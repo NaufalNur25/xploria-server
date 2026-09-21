@@ -1,11 +1,31 @@
 import asyncio
 import json
 import logging
+import sys
+import types
 from datetime import datetime, timezone
 import websockets
 import traceback
 
 from hal import sensor, motor, led, power, rfid, telemetry, pin, audio, display, motion, lan, ai
+
+# Buat modul virtual 'xploria_hal' agar kode Blockly yang menggunakan
+# 'from xploria_hal import sensor' (atau modul HAL lainnya) bisa resolve
+# tanpa error ModuleNotFoundError.
+_xploria_hal_module = types.ModuleType("xploria_hal")
+_xploria_hal_module.sensor    = sensor
+_xploria_hal_module.motor     = motor
+_xploria_hal_module.led       = led
+_xploria_hal_module.power     = power
+_xploria_hal_module.rfid      = rfid
+_xploria_hal_module.telemetry = telemetry
+_xploria_hal_module.pin       = pin
+_xploria_hal_module.audio     = audio
+_xploria_hal_module.display   = display
+_xploria_hal_module.motion    = motion
+_xploria_hal_module.lan       = lan
+_xploria_hal_module.ai        = ai
+sys.modules["xploria_hal"] = _xploria_hal_module
 
 connected_clients = set()
 subscribed_clients = set()
@@ -74,6 +94,7 @@ def execute_python_code(code_str, client_ws, loop):
         time.sleep(0.05)
         
     exec_globals = {
+        "__builtins__": __builtins__,
         "sensor": sensor,
         "motor": motor,
         "led": led,
@@ -87,6 +108,7 @@ def execute_python_code(code_str, client_ws, loop):
         "lan": lan,
         "ai": ai,
         "time": __import__("time"),
+        "math": __import__("math"),
         "print": custom_print,
     }
     
