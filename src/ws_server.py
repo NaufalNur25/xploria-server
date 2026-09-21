@@ -20,13 +20,13 @@ async def push_telemetry_loop(interval=1.0):
                 solar_power = power.read_solar_power()
 
                 telemetry_data = {
-                    "temperature": sensor.read_temperature(4),
-                    "humidity": sensor.read_humidity(4),
+                    "temperature": sensor.read_temperature(27),
+                    "humidity": sensor.read_humidity(27),
                     "gas": sensor.read_gas(),
                     "light": sensor.read_light(),
                     "motion_pir1": sensor.read_motion(17),
-                    "motion_pir2": sensor.read_motion(27),
-                    "distance_cm": sensor.read_ultrasonic(22, 23),
+                    "motion_pir2": sensor.read_motion(22), # dipindah sementara agar tidak conflict dengan DHT di 27
+                    "distance_cm": sensor.read_ultrasonic(23, 24),
                     "house_power": house_power,
                     "solar_power": solar_power,
                     "rfid_uid": rfid.read_uid()

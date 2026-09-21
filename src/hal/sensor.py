@@ -56,7 +56,9 @@ class SensorHAL:
                 self._dht_pins[p] = adafruit_dht.DHT22(getattr(board, f'D{p}'))
             val = self._dht_pins[p].temperature
             return val if val is not None else 0
-        except Exception:
+        except Exception as e:
+            import sys
+            # print(f"[xploria_hal] DHT Temperature Error on pin {p}: {e}", file=sys.stderr)
             return 0
 
     def read_humidity(self, p=4):
@@ -66,7 +68,9 @@ class SensorHAL:
                 self._dht_pins[p] = adafruit_dht.DHT22(getattr(board, f'D{p}'))
             val = self._dht_pins[p].humidity
             return val if val is not None else 0
-        except Exception:
+        except Exception as e:
+            import sys
+            # print(f"[xploria_hal] DHT Humidity Error on pin {p}: {e}", file=sys.stderr)
             return 0
 
     def read_ultrasonic(self, trig=23, echo=24):
