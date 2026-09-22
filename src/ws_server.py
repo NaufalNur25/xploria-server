@@ -62,12 +62,12 @@ def _gather_telemetry():
     house_power = power.read_house_power()
     solar_power = power.read_solar_power()
     return {
-        "temperature": sensor.read_temperature(4),
-        "humidity": sensor.read_humidity(4),
+        "temperature": sensor.read_temperature(27),
+        "humidity": sensor.read_humidity(27),
         "gas": sensor.read_gas(),
         "light": sensor.read_light(),
         "motion_pir1": sensor.read_motion(17),
-        "motion_pir2": sensor.read_motion(27),
+        "motion_pir2": sensor.read_motion(4),
         "distance_cm": sensor.read_ultrasonic(23, 24),
         "house_power": house_power,
         "solar_power": solar_power,
@@ -169,12 +169,23 @@ def execute_python_code(code_str, client_ws, loop):
         local_proxy = HalProxy(proxy.target, check_stop)
         local_proxies[k] = local_proxy
 
+    # Pre-import modul yang sering dipakai Blockly/Custom Code
+    try: import gpiod
+    except ImportError: gpiod = None
+    try: import board
+    except ImportError: board = None
+    try: import adafruit_dht
+    except ImportError: adafruit_dht = None
+
     exec_globals = {
         "__builtins__": __builtins__,
         **local_proxies,
         "time": custom_time,
         "math": __import__("math"),
         "print": custom_print,
+        "gpiod": gpiod,
+        "board": board,
+        "adafruit_dht": adafruit_dht,
     }
 
     try:
