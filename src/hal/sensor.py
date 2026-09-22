@@ -169,7 +169,9 @@ class SensorHAL:
 
             return temperature, humidity
 
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f"[sensor] DHT read error on pin {p}: {e}", file=sys.stderr)
             return None, None
         finally:
             try:
@@ -197,7 +199,9 @@ class SensorHAL:
         # Tetap update timestamp meskipun gagal, agar tidak memborbardir pin yang mati
         # dengan polling berturut-turut tanpa jeda
         if temp is None:
+            import sys
             self._dht_cache[p]['last_read'] = now
+            print(f"[sensor] DHT read failed on pin {p}, returning cached value: {self._dht_cache[p][key]}", file=sys.stderr)
 
         return self._dht_cache[p][key]
 
