@@ -105,7 +105,7 @@ class SensorHAL:
 
         try:
             # 1. Kirim START Signal (LOW 2ms lalu HIGH dan lepas)
-            _gpio.gpio_claim_output(chip, offset, getattr(_gpio, 'SET_PULL_UP', 0), 1)
+            _gpio.gpio_claim_output(chip, offset, 1)
             time.sleep(0.01)
             _gpio.gpio_write(chip, offset, 0)
             time.sleep(0.002) # 2 milidetik (cukup untuk DHT11 maupun DHT22)
