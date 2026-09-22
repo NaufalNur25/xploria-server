@@ -38,134 +38,64 @@ class SensorHAL:
         except Exception:
             return False
 
-    def _read_dht22_lgpio(self, p):
-        """
-        Membaca DHT22 langsung via lgpio tanpa adafruit_dht atau RPi.GPIO.
-        Protokol DHT22:
-          1. Kirim sinyal START: pull LOW 1ms, lalu pull HIGH dan lepas
-          2. Sensor merespons: LOW 80us, HIGH 80us
-          3. 40 bit data: setiap bit dimulai LOW 50us, lalu HIGH
-             - HIGH ~26-28us = bit 0
-             - HIGH ~70us    = bit 1
-          4. Parse 40 bit → 2 byte humidity + 2 byte temp + 1 byte checksum
-        """
-        _gpio = get_gpio_lib()
-        if not _gpio:
-            return None, None
+    def read_gas(self, p=17):
+        return self._read_digital_bool(p, active_high=True)
 
-        chip, offset = get_gpio(p)
-        if not chip:
-            return None, None
+    def read_motion(self, p=27):
+        return self._read_digital_bool(p, active_high=True)
 
-        # Bebaskan pin dulu jika sebelumnya diklaim sebagai input
-        try:
-            _gpio.gpio_free(chip, offset)
-        except Exception:
-            pass
-        self._in_pins.discard(p)
+    def read_ir_obstacle(self, p=23):
+        return self._read_digital_bool(p, active_high=False)
 
-        try:
-            # --- KIRIM SINYAL START ---
-            _gpio.gpio_claim_output(chip, offset, 0, 1)  # HIGH
-            time.sleep(0.05)
-            _gpio.gpio_write(chip, offset, 0)            # LOW
-            time.sleep(0.001)                            # 1ms LOW
-            _gpio.gpio_write(chip, offset, 1)            # HIGH
-
-            # --- SWITCH KE INPUT untuk baca respons sensor ---
-            _gpio.gpio_free(chip, offset)
-            _gpio.gpio_claim_input(chip, offset, 0)      # no pull
-
-            # Tunggu sensor menarik LOW (respons awal)
-            timeout = time.time() + 0.1
-            while _gpio.gpio_read(chip, offset) == 1:
-                if time.time() > timeout:
-                    return None, None
-
-            # Baca 40 bit data
-            bits = []
-            for _ in range(40):
-                # Tunggu LOW (start of bit) selesai
-                timeout = time.time() + 0.1
-                while _gpio.gpio_read(chip, offset) == 0:
-                    if time.time() > timeout:
-                        return None, None
-
-                # Hitung durasi HIGH
-                t_start = time.time()
-                timeout = time.time() + 0.1
-                while _gpio.gpio_read(chip, offset) == 1:
-                    if time.time() > timeout:
-                        return None, None
-                t_high = time.time() - t_start
-
-                # HIGH > 40us = bit 1, HIGH < 40us = bit 0
-                bits.append(1 if t_high > 0.00004 else 0)
-
-            # --- PARSE 40 BIT ---
-            if len(bits) != 40:
-                return None, None
-
-            def bits_to_int(b):
-                val = 0
-                for bit in b:
-                    val = (val << 1) | bit
-                return val
-
-            hum_int  = bits_to_int(bits[0:8])
-            hum_dec  = bits_to_int(bits[8:16])
-            temp_int = bits_to_int(bits[16:24])
-            temp_dec = bits_to_int(bits[24:32])
-            checksum = bits_to_int(bits[32:40])
-
-            # Validasi checksum
-            calc = (hum_int + hum_dec + temp_int + temp_dec) & 0xFF
-            if calc != checksum:
-                return None, None
-
-            humidity    = hum_int + hum_dec / 10.0
-            temperature = temp_int + temp_dec / 10.0
-
-            # DHT22 bisa encode suhu negatif dengan MSB bit 16
-            if bits[16] == 1:
-                temperature = -temperature
-
-            return temperature, humidity
-
-        except Exception as e:
-            print(f"[xploria_hal] DHT22 lgpio read error pin {p}: {e}", file=sys.stderr)
-            return None, None
-        finally:
-            # Kembalikan pin ke INPUT biasa setelah selesai
-            try:
-                _gpio.gpio_free(chip, offset)
-                _gpio.gpio_claim_input(chip, offset, getattr(_gpio, 'SET_PULL_UP', 0))
-                self._in_pins.add(p)
-            except Exception:
-                pass
+    def read_soil_moisture(self, p=22):
+        return self._read_digital_bool(p, active_high=False)
 
     def _get_dht_cached_reading(self, p, key):
         """
-        Membaca DHT22 dengan throttle 2 detik (hardware limit DHT22).
-        Menggunakan lgpio langsung — tanpa adafruit_dht, tanpa RPi.GPIO.
+        Membaca DHT22 via adafruit_dht (identik dengan xploria_hal.py yang terbukti jalan),
+        dengan tambahan cache throttle 2 detik agar tidak over-polling hardware.
+        DHT22 default pin adalah 4 sesuai wiring fisik aktual.
         """
         now = time.time()
 
         if p not in self._dht_cache:
             self._dht_cache[p] = {'last_read': 0, 'temperature': 0, 'humidity': 0}
 
+        # Throttle: DHT22 hanya bisa dibaca tiap 2 detik
         if now - self._dht_cache[p]['last_read'] < 2.0:
             return self._dht_cache[p][key]
 
-        temperature, humidity = self._read_dht22_lgpio(p)
+        try:
+            import adafruit_dht, board
+            if p not in self._dht_pins:
+                self._dht_pins[p] = adafruit_dht.DHT22(getattr(board, f'D{p}'))
+            
+            val_temp = self._dht_pins[p].temperature
+            val_hum  = self._dht_pins[p].humidity
 
-        if temperature is not None:
-            self._dht_cache[p]['temperature'] = temperature
-        if humidity is not None:
-            self._dht_cache[p]['humidity'] = humidity
+            if val_temp is not None:
+                self._dht_cache[p]['temperature'] = val_temp
+            if val_hum is not None:
+                self._dht_cache[p]['humidity'] = val_hum
+
+        except Exception as e:
+            print(f"[xploria_hal] DHT error pin {p}: {e}", file=sys.stderr)
+            # Reset instance yang rusak agar percobaan berikutnya fresh
+            if p in self._dht_pins:
+                try:
+                    self._dht_pins[p].exit()
+                except Exception:
+                    pass
+                del self._dht_pins[p]
 
         self._dht_cache[p]['last_read'] = now
         return self._dht_cache[p][key]
+
+    def read_temperature(self, p=4):
+        return self._get_dht_cached_reading(p, 'temperature')
+
+    def read_humidity(self, p=4):
+        return self._get_dht_cached_reading(p, 'humidity')
 
 
 
