@@ -6,6 +6,8 @@ class SensorHAL:
     def __init__(self):
         self._in_pins = set()
         self._dht_pins = {}
+        # Menambahkan cache untuk DHT agar tidak crash saat di-polling cepat
+        self._dht_cache = {} 
 
     def _claim_in(self, chip, offset, p_name):
         _gpio = get_gpio_lib()
@@ -49,29 +51,51 @@ class SensorHAL:
     def read_soil_moisture(self, p=22):
         return self._read_digital_bool(p, active_high=False)
 
-    def read_temperature(self, p=4):
+    def _get_dht_cached_reading(self, p, key):
+        """Helper internal untuk membaca DHT dengan throttle 2 detik (hardware limit)"""
+        now = time.time()
+        
+        # Inisialisasi struktur cache jika belum ada
+        if p not in self._dht_cache:
+            self._dht_cache[p] = {'last_read': 0, 'temperature': 0, 'humidity': 0}
+            
+        # DHT22 hardware butuh waktu 2 detik antar pembacaan
+        if now - self._dht_cache[p]['last_read'] < 2.0:
+            return self._dht_cache[p][key]
+            
         try:
             import adafruit_dht, board
             if p not in self._dht_pins:
-                self._dht_pins[p] = adafruit_dht.DHT22(getattr(board, f'D{p}'))
-            val = self._dht_pins[p].temperature
-            return val if val is not None else 0
+                # Menggunakan fallback D4 jika pin tidak ditemukan di modul board
+                pin_attr = getattr(board, f'D{p}', getattr(board, 'D4', None))
+                self._dht_pins[p] = adafruit_dht.DHT22(pin_attr)
+                
+            try:
+                # Coba baca sensor
+                self._dht_pins[p].measure()
+                val_temp = self._dht_pins[p].temperature
+                val_hum = self._dht_pins[p].humidity
+                
+                # Update cache dengan data yang valid
+                self._dht_cache[p]['temperature'] = val_temp if val_temp is not None else self._dht_cache[p]['temperature']
+                self._dht_cache[p]['humidity'] = val_hum if val_hum is not None else self._dht_cache[p]['humidity']
+                
+            except Exception as read_err:
+                # DHT membaca bisa gagal karena timing issues, fallback ke cache terakhir
+                pass
+                
+            self._dht_cache[p]['last_read'] = now
+            return self._dht_cache[p][key]
+            
         except Exception as e:
-            import sys
-            # print(f"[xploria_hal] DHT Temperature Error on pin {p}: {e}", file=sys.stderr)
-            return 0
+            # Jika hardware pin error parah (tidak root, i2c tertutup, dll)
+            return self._dht_cache[p][key]
+
+    def read_temperature(self, p=4):
+        return self._get_dht_cached_reading(p, 'temperature')
 
     def read_humidity(self, p=4):
-        try:
-            import adafruit_dht, board
-            if p not in self._dht_pins:
-                self._dht_pins[p] = adafruit_dht.DHT22(getattr(board, f'D{p}'))
-            val = self._dht_pins[p].humidity
-            return val if val is not None else 0
-        except Exception as e:
-            import sys
-            # print(f"[xploria_hal] DHT Humidity Error on pin {p}: {e}", file=sys.stderr)
-            return 0
+        return self._get_dht_cached_reading(p, 'humidity')
 
     def read_ultrasonic(self, trig=23, echo=24):
         _gpio = get_gpio_lib()
