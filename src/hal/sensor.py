@@ -60,8 +60,15 @@ class SensorHAL:
         return (raw == 0) if raw is not None else False
 
     def read_motion(self, p=27):
-        """PIR sensor: active-high, NO pull resistor."""
-        raw = self._read_raw(p, pull=0)
+        """
+        PIR sensor: active-high.
+        Menggunakan SET_PULL_DOWN agar pin tidak floating saat sensor idle.
+        Idle  = pin LOW  → False
+        Gerak = pin HIGH → True
+        """
+        _gpio = get_gpio_lib()
+        pull_down = getattr(_gpio, 'SET_PULL_DOWN', 1) if _gpio else 1
+        raw = self._read_raw(p, pull=pull_down)
         return bool(raw) if raw is not None else False
 
     def read_ir_obstacle(self, p=23):
