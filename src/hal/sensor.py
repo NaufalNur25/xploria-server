@@ -216,39 +216,61 @@ class SensorHAL:
 
         if not c_trig or not c_echo: return 0
 
+        # Pastikan pin dibebaskan dulu (dari bacaan sebelumnya)
         try:
-            for _ in range(10):
-                try:
-                    _gpio.gpio_claim_output(c_trig, o_trig)
-                    break
-                except Exception:
-                    time.sleep(0.2)
-            for _ in range(10):
-                try:
-                    _gpio.gpio_claim_input(c_echo, o_echo)
-                    break
-                except Exception:
-                    time.sleep(0.2)
-
-            _gpio.gpio_write(c_trig, o_trig, 0)
-            time.sleep(0.000002)
-            _gpio.gpio_write(c_trig, o_trig, 1)
-            time.sleep(0.00001)
-            _gpio.gpio_write(c_trig, o_trig, 0)
-
-            start = time.time()
-            timeout = start + 0.04
-
-            while _gpio.gpio_read(c_echo, o_echo) == 0:
-                start = time.time()
-                if start > timeout: return 0
-
-            stop = time.time()
-            while _gpio.gpio_read(c_echo, o_echo) == 1:
-                stop = time.time()
-                if stop > timeout: return 0
-
-            return (stop - start) * 34300 / 2
+            _gpio.gpio_free(c_trig, o_trig)
+            _gpio.gpio_free(c_echo, o_echo)
         except Exception:
+            pass
+
+        try:
+            # 1. Setup Pin
+            _gpio.gpio_claim_output(c_trig, o_trig)
+            # Echo butuh PULL DOWN agar idle = 0
+            _gpio.gpio_claim_input(c_echo, o_echo, getattr(_gpio, 'SET_PULL_DOWN', 1))
+
+            # 2. Trigger
+            _gpio.gpio_write(c_trig, o_trig, 0)
+            time.sleep(0.002) # Settle time
+
+            _gpio.gpio_write(c_trig, o_trig, 1)
+            time.sleep(0.00001) # 10us pulse
+            _gpio.gpio_write(c_trig, o_trig, 0)
+
+            # 3. Tunggu balasan HIGH
+            t_timeout = time.time() + 0.1
+            pulse_start = time.time()
+            while _gpio.gpio_read(c_echo, o_echo) == 0:
+                pulse_start = time.time()
+                if pulse_start > t_timeout:
+                    return 0
+
+            # 4. Tunggu balasan kembali LOW (selesai mantul)
+            t_timeout = time.time() + 0.1
+            pulse_end = time.time()
+            while _gpio.gpio_read(c_echo, o_echo) == 1:
+                pulse_end = time.time()
+                if pulse_end > t_timeout:
+                    return 0
+
+            # 5. Hitung jarak (Durasi * Kecepatan Suara / 2)
+            duration = pulse_end - pulse_start
+            distance_cm = (duration * 34300) / 2.0
+            
+            # Batasi nilai logika ultrasonik HC-SR04 (maks ~400 cm)
+            if distance_cm > 400:
+                return 400
+                
+            return round(distance_cm, 1)
+
+        except Exception as e:
+            print(f"[xploria_hal] Ultrasonic Error: {e}", file=sys.stderr)
             return 0
+        finally:
+            # SANGAT PENTING: Bebaskan pin agar iterasi berikutnya tidak error
+            try:
+                _gpio.gpio_free(c_trig, o_trig)
+                _gpio.gpio_free(c_echo, o_echo)
+            except Exception:
+                pass
 
