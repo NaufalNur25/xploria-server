@@ -55,9 +55,9 @@ class SensorHAL:
             return None
 
     def read_gas(self, p=17):
-        """MQ Gas sensor: active-high, NO pull resistor."""
+        """MQ Gas sensor: active-low (DO LOW saat gas terdeteksi, modul LM393)."""
         raw = self._read_raw(p, pull=0)
-        return bool(raw) if raw is not None else False
+        return (raw == 0) if raw is not None else False
 
     def read_motion(self, p=27):
         """PIR sensor: active-high, NO pull resistor."""
