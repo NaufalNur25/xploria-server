@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 class RFIDHAL:
     def __init__(self):
         self._pn532 = None
@@ -6,7 +10,6 @@ class RFIDHAL:
 
     def _init_device(self):
         if not self._initialized:
-            self._initialized = True
             try:
                 import board
                 import busio
@@ -15,8 +18,12 @@ class RFIDHAL:
                 i2c = busio.I2C(board.SCL, board.SDA)
                 self._pn532 = PN532_I2C(i2c, debug=False)
                 self._pn532.SAM_configuration()
-            except Exception:
+                self._initialized = True  # Set True hanya jika berhasil
+                logger.info("PN532 RFID initialized successfully")
+            except Exception as e:
                 self._pn532 = None
+                # Tidak set _initialized=True, sehingga bisa retry pada panggilan berikutnya
+                logger.warning(f"PN532 RFID init failed: {e}")
 
     def read_uid(self, timeout=0.1):
         self._init_device()
@@ -27,7 +34,8 @@ class RFIDHAL:
             if uid is not None:
                 return ':'.join([f'{x:02X}' for x in uid])
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"RFID read error: {e}")
             return None
 
     def _normalize_uid(self, uid: str) -> str:

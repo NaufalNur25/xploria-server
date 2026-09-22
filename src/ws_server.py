@@ -52,47 +52,59 @@ sys.modules["xploria_hal"] = _xploria_hal_module
 connected_clients = set()
 subscribed_clients = set()
 
+# Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
+_main_loop: asyncio.AbstractEventLoop = None
+
+
+def _gather_telemetry():
+    """Kumpulkan semua data sensor secara sinkron. Dipanggil di thread pool."""
+    house_power = power.read_house_power()
+    solar_power = power.read_solar_power()
+    return {
+        "temperature": sensor.read_temperature(4),
+        "humidity": sensor.read_humidity(4),
+        "gas": sensor.read_gas(),
+        "light": sensor.read_light(),
+        "motion_pir1": sensor.read_motion(17),
+        "motion_pir2": sensor.read_motion(27),
+        "distance_cm": sensor.read_ultrasonic(23, 24),
+        "house_power": house_power,
+        "solar_power": solar_power,
+        "rfid_uid": rfid.read_uid()
+    }
+
+
 async def push_telemetry_loop(interval=1.0):
     """Loop for periodically pushing real sensor data to subscribed clients."""
     while True:
         # Check if flutter explicitly started it or if they subscribed
-        if subscribed_clients and getattr(telemetry, '_running', True):
+        if subscribed_clients and getattr(telemetry, '_running', False):
             try:
-                house_power = power.read_house_power()
-                solar_power = power.read_solar_power()
-
-                telemetry_data = {
-                    "temperature": sensor.read_temperature(4),
-                    "humidity": sensor.read_humidity(4),
-                    "gas": sensor.read_gas(),
-                    "light": sensor.read_light(),
-                    "motion_pir1": sensor.read_motion(17),
-                    "motion_pir2": sensor.read_motion(27),
-                    "distance_cm": sensor.read_ultrasonic(23, 24),
-                    "house_power": house_power,
-                    "solar_power": solar_power,
-                    "rfid_uid": rfid.read_uid()
-                }
+                # Jalankan semua blocking sensor I/O di thread pool
+                # agar tidak memblokir event loop WebSocket
+                telemetry_data = await asyncio.to_thread(_gather_telemetry)
 
                 payload = {
                     "type": "telemetry",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "telemetry": telemetry_data
                 }
-                
+
                 msg = json.dumps(payload)
                 websockets.broadcast(subscribed_clients, msg)
-                
+
             except Exception as e:
                 logging.error(f"Error gathering/sending telemetry: {e}")
-                
+
         await asyncio.sleep(interval)
 
 async def adhoc_telemetry_loop():
+    """Kirim pesan ad-hoc dari Blockly (telemetry.send()) ke semua klien."""
     telemetry._ensure_queue()
     if not getattr(telemetry, '_queue', None):
+        logging.warning("adhoc_telemetry_loop: queue not available, ad-hoc telemetry disabled")
         return
-        
+
     while True:
         msg = await telemetry._queue.get()
         if connected_clients:
@@ -105,9 +117,9 @@ class StopExecution(Exception):
 def execute_python_code(code_str, client_ws, loop):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
     
-    # Flag to signal stopping
+    # Flag to signal stopping — per-execution closure, tidak dishare
     setattr(client_ws, 'stop_requested', False)
-    
+
     def check_stop():
         if getattr(client_ws, 'stop_requested', False):
             raise StopExecution("Execution stopped by user")
@@ -117,22 +129,21 @@ def execute_python_code(code_str, client_ws, loop):
         sep = kwargs.get('sep', ' ')
         end = kwargs.get('end', '\n')
         msg = sep.join(str(a) for a in args) + end
-        
+
         payload = json.dumps({"type": "output", "payload": msg})
         try:
             asyncio.run_coroutine_threadsafe(client_ws.send(payload), loop)
         except Exception:
             pass
-        
-        import time
-        time.sleep(0.05)
-        
+
+        import time as _time
+        _time.sleep(0.05)
+
     import time
     original_sleep = time.sleep
-    
+
     def custom_sleep(secs):
         check_stop()
-        # Jika sleep-nya panjang, kita bagi-bagi agar bisa di-interupsi
         if secs > 0.1:
             end_time = time.time() + secs
             while time.time() < end_time:
@@ -143,107 +154,120 @@ def execute_python_code(code_str, client_ws, loop):
         check_stop()
 
     # Buat modul virtual time kustom agar sleep bisa di-intercept
-    import types
     custom_time = types.ModuleType("time")
     custom_time.__dict__.update(time.__dict__)
     custom_time.sleep = custom_sleep
-    
-    # Set the check_stop function for all proxies during this execution
-    for proxy in global_proxies.values():
-        proxy.check_stop_func = check_stop
+
+    # Buat proxy lokal untuk execution ini agar stop signal terisolasi per-client
+    local_proxies = {}
+    for k, proxy in global_proxies.items():
+        local_proxy = HalProxy(proxy.target, check_stop)
+        local_proxies[k] = local_proxy
 
     exec_globals = {
         "__builtins__": __builtins__,
-        **global_proxies,
+        **local_proxies,
         "time": custom_time,
         "math": __import__("math"),
         "print": custom_print,
     }
-    
+
     try:
         exec(code_str, exec_globals)
         return {"type": "output", "payload": "\n[Proses Selesai]"}
     except StopExecution:
         return {"type": "output", "payload": "\n[Proses Dihentikan]"}
-    except Exception as e:
+    except Exception:
         return {"type": "error", "payload": traceback.format_exc()}
-    finally:
-        # Bersihkan reference
-        for proxy in global_proxies.values():
-            proxy.check_stop_func = None
 
 
 async def handler(websocket):
     client_addr = websocket.remote_address
     logging.info(f"Client connected: {client_addr}")
     connected_clients.add(websocket)
-    
+
     try:
         async for message in websocket:
             try:
                 data = json.loads(message)
-                
+
                 if data.get("type") == "run":
                     code = data.get("code", "")
                     loop = asyncio.get_running_loop()
-                    
-                    # Fungsi untuk menjalankan eksekusi dan mengirim hasil akhir
+
                     async def run_in_background():
-                        # Pastikan flag reset saat mulai
                         setattr(websocket, 'stop_requested', False)
                         response = await asyncio.to_thread(execute_python_code, code, websocket, loop)
                         try:
                             await websocket.send(json.dumps(response))
                         except Exception:
                             pass
-                            
-                    # Spawn sebagai task agar TIDAK MEMBLOKIR pembacaan pesan websocket (seperti "stop")
+
                     asyncio.create_task(run_in_background())
                     continue
-                    
+
                 cmd = data.get("command")
                 msg_type = data.get("type")
-                
+
                 if msg_type == "stop" or cmd == "stop":
                     setattr(websocket, 'stop_requested', True)
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
-                
+
                 if cmd == "subscribe_telemetry" or msg_type == "subscribe_telemetry":
                     subscribed_clients.add(websocket)
-                    # Automatically set telemetry flag to true
-                    telemetry.start_stream() 
+                    telemetry.start_stream()
                     response = {"type": "ack", "command": "subscribe_telemetry", "status": "ok", "message": "Telemetry subscribed"}
                     await websocket.send(json.dumps(response))
                     continue
                 elif cmd == "unsubscribe_telemetry" or msg_type == "unsubscribe_telemetry":
                     subscribed_clients.discard(websocket)
+                    # Hentikan polling sensor jika tidak ada subscriber
+                    if not subscribed_clients:
+                        telemetry.stop_stream()
                     response = {"type": "ack", "command": "unsubscribe_telemetry", "status": "ok"}
                     await websocket.send(json.dumps(response))
                     continue
-                
+
                 response = {"type": "ack", "command": data.get("command", "unknown"), "status": "error", "message": "Unknown command"}
                 await websocket.send(json.dumps(response))
-                
+
             except json.JSONDecodeError:
                 pass
             except Exception as e:
                 logging.error(f"Error handling message: {e}")
-                
+
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
-        connected_clients.remove(websocket)
+        # Gunakan discard agar tidak raise KeyError jika client belum sempat ditambahkan
+        connected_clients.discard(websocket)
         subscribed_clients.discard(websocket)
+        if not subscribed_clients:
+            telemetry.stop_stream()
         logging.info(f"Client disconnected: {client_addr}")
 
+
 async def start_server(host="0.0.0.0", port=9002):
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
     telemetry._ensure_queue()
-    
-    asyncio.create_task(push_telemetry_loop())
-    asyncio.create_task(adhoc_telemetry_loop())
-    
+    telemetry._loop = _main_loop  # Simpan loop reference untuk thread-safe queue access
+
     logging.info(f"Starting Xploria Raspberry Pi Daemon on ws://{host}:{port}")
-    async with websockets.serve(handler, host, port):
-        await asyncio.Future()
+
+    # Buat server dulu, lalu jalankan background tasks di dalam context server
+    async with websockets.serve(handler, host, port, max_size=1_048_576):
+        logging.info(f"server listening on {host}:{port}")
+        telemetry_task = asyncio.create_task(push_telemetry_loop())
+        adhoc_task = asyncio.create_task(adhoc_telemetry_loop())
+        try:
+            await asyncio.Future()  # Run forever
+        finally:
+            telemetry_task.cancel()
+            adhoc_task.cancel()
+            try:
+                await asyncio.gather(telemetry_task, adhoc_task, return_exceptions=True)
+            except Exception:
+                pass

@@ -1,0 +1,43 @@
+[Unit]
+Description=Xploria Raspberry Pi Daemon
+Documentation=https://github.com/your-org/xploria-rpi-daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=xploria
+Group=xploria
+
+# Path ke direktori project
+WorkingDirectory=/home/xploria/xploria-server
+
+# Jalankan dengan virtualenv
+ExecStart=/home/xploria/xploria-server/.venv/bin/python3 main.py
+
+# Restart otomatis jika crash
+Restart=on-failure
+RestartSec=5s
+
+# Batas restart: maksimal 5x dalam 60 detik sebelum menyerah
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Output ke journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xploria-daemon
+
+# Environment production
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/xploria/xploria-server/src
+
+# Keamanan dasar
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Izin akses GPIO (lgpio membutuhkan akses ke /dev/gpiochip*)
+SupplementaryGroups=gpio i2c spi
+
+[Install]
+WantedBy=multi-user.target

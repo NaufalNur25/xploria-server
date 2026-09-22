@@ -3,7 +3,7 @@
 Project ini adalah **Production-Ready Python Server** khusus untuk di-deploy ke Raspberry Pi. Project ini berdiri sendiri dan dilengkapi dengan server WebSocket bawaan, modul baca sensor hardware yang lengkap, serta eksekutor dinamis (Remote Code Execution) untuk mendukung Blockly dari aplikasi Flutter.
 
 ## Fitur Utama
-1. **Server WebSocket Bawaan (`websockets`)**: Mendengarkan port `8765` secara default, bisa di-hit langsung dari aplikasi Flutter.
+1. **Server WebSocket Bawaan (`websockets`)**: Mendengarkan port `9002` secara default, bisa di-hit langsung dari aplikasi Flutter.
 2. **Pub/Sub Telemetri Otomatis**: Secara efisien menge-push data dari Pin Raspberry Pi (Sensor Suhu, Kelembaban, Gas, dsb) hanya kepada client yang ter-subscribe.
 3. **Eksekusi Blockly Real-Time**: Client Flutter bisa mengirim payload `{"type": "run", "code": "..."}` dan Daemon ini akan mengeksekusi script Python tersebut secara aman tanpa mem-blokir proses (Asynchronous).
 4. **Real-time Log Streaming**: Fungsi `print()` di dalam Blockly Anda akan langsung di-stream kembali ke terminal UI Flutter.
@@ -24,7 +24,28 @@ Jalankan file `main.py` menggunakan python:
 python3 main.py
 ```
 
-Setelah log memunculkan `Starting Xploria Raspberry Pi Daemon on ws://0.0.0.0:8765`, server ini sudah siap di-hit oleh aplikasi Flutter menggunakan IP lokal Raspberry Pi (contoh: `ws://192.168.1.10:8765`).
+Setelah log memunculkan `Starting Xploria Raspberry Pi Daemon on ws://0.0.0.0:9002`, server ini sudah siap di-hit oleh aplikasi Flutter menggunakan IP lokal Raspberry Pi (contoh: `ws://192.168.1.10:9002`).
+
+## Deploy Production (systemd)
+
+Agar daemon berjalan otomatis saat boot dan restart jika crash:
+
+```bash
+# Salin service file ke systemd
+sudo cp xploria-daemon.service /etc/systemd/system/
+
+# Sesuaikan WorkingDirectory dan ExecStart di file service jika path berbeda
+# sudo nano /etc/systemd/system/xploria-daemon.service
+
+# Aktifkan dan jalankan
+sudo systemctl daemon-reload
+sudo systemctl enable xploria-daemon
+sudo systemctl start xploria-daemon
+
+# Cek status dan log
+sudo systemctl status xploria-daemon
+sudo journalctl -u xploria-daemon -f
+```
 
 ## Struktur Project
 ```text
