@@ -5,15 +5,301 @@ from .core import get_gpio, get_gpio_lib
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Background worker: DHT22
+# ---------------------------------------------------------------------------
+
+class _DHTWorker(threading.Thread):
+    """
+    Dedicated daemon thread yang membaca sensor DHT22 secara kontinu.
+
+    Arsitektur:
+    - Thread ini berjalan selamanya di background (daemon=True).
+    - Setiap selesai membaca (berhasil atau gagal) langsung update _cache
+      yang dilindungi oleh _lock.
+    - read_temperature() / read_humidity() di SensorHAL hanya perlu baca
+      nilai dari _cache — 100% non-blocking, tidak pernah menyentuh GPIO
+      dari event loop utama.
+    - Interval minimum antar baca adalah DHT22_MIN_INTERVAL (2 detik),
+      sesuai spesifikasi sensor. Saat gagal cooldown diperpendek (0.5 detik)
+      agar retry lebih cepat tanpa spam.
+    """
+
+    DHT22_MIN_INTERVAL = 2.0   # detik, minimum antar pembacaan
+    RETRY_BASE         = 0.5   # detik base untuk backoff
+    MAX_FAILURES       = 5     # batas maksimal gagal sebelum pause panjang
+    MAX_COOLDOWN       = 60.0  # detik, pause panjang jika sensor mati
+
+    def __init__(self, pin: int):
+        super().__init__(name=f"DHT-worker-GPIO{pin}", daemon=True)
+        self.pin = pin
+        self._lock = threading.Lock()
+        self._cache = {"temperature": None, "humidity": None, "last_ok": 0.0}
+        self._stop_event = threading.Event()
+        self._fail_count = 0
+        self._dht_device = None
+
+    def stop(self):
+        self._stop_event.set()
+        if self._dht_device is not None:
+            try:
+                self._dht_device.exit()
+            except:
+                pass
+
+    def get(self, key: str):
+        """Non-blocking: kembalikan nilai cache saat ini (None jika belum ada data)."""
+        with self._lock:
+            return self._cache[key]
+
+    # ------------------------------------------------------------------
+    # Internal: DHT22 via adafruit_dht
+    # ------------------------------------------------------------------
+
+    def _init_device(self):
+        if self._dht_device is None:
+            try:
+                import adafruit_dht
+                import board
+                pin_name = f"D{self.pin}"
+                if hasattr(board, pin_name):
+                    self._dht_device = adafruit_dht.DHT22(getattr(board, pin_name))
+                else:
+                    logger.error(f"Board does not have pin {pin_name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize adafruit_dht for pin {self.pin}: {e}")
+
+    def _read_raw(self):
+        """
+        Baca satu sampel dari sensor DHT22 via adafruit_dht.
+        Return (temperature_float, humidity_float) atau (None, None).
+        Dipanggil HANYA dari dalam thread ini.
+        """
+        self._init_device()
+        if self._dht_device is None:
+            return None, None
+            
+        try:
+            t = self._dht_device.temperature
+            h = self._dht_device.humidity
+            return t, h
+        except RuntimeError as e:
+            # RuntimeError wajar dilempar oleh adafruit_dht saat gagal baca (checksum, timeout)
+            logger.debug(f"DHT22 pin {self.pin} read error: {e}")
+            return None, None
+        except Exception as e:
+            logger.warning(f"DHT22 pin {self.pin} unexpected error: {e}")
+            return None, None
+
+    # ------------------------------------------------------------------
+    # Thread loop
+    # ------------------------------------------------------------------
+
+    def run(self):
+        logger.info(f"DHT worker started for GPIO {self.pin}")
+        while not self._stop_event.is_set():
+            t, h = self._read_raw()
+
+            with self._lock:
+                if t is not None and h is not None:
+                    self._cache["temperature"] = t
+                    self._cache["humidity"]    = h
+                    self._cache["last_ok"]     = time.time()
+                    self._fail_count = 0  # Reset fail count
+                    logger.debug(f"DHT22 GPIO{self.pin}: {t:.1f}°C  {h:.1f}%")
+                    sleep_s = self.DHT22_MIN_INTERVAL
+                else:
+                    self._fail_count += 1
+                    if self._fail_count >= self.MAX_FAILURES:
+                        sleep_s = self.MAX_COOLDOWN
+                        logger.warning(f"DHT22 GPIO{self.pin} failed {self._fail_count} times, pausing for {sleep_s}s")
+                    else:
+                        sleep_s = self.RETRY_BASE * (2 ** (self._fail_count - 1))  # Exponential backoff
+                        logger.debug(f"DHT22 GPIO{self.pin} failed, backoff {sleep_s}s (fail {self._fail_count})")
+
+            # Tunggu sebelum baca berikutnya; bisa diinterupsi oleh stop()
+            self._stop_event.wait(timeout=sleep_s)
+
+        logger.info(f"DHT worker stopped for GPIO {self.pin}")
+
+
+# ---------------------------------------------------------------------------
+# Background worker: HC-SR04 Ultrasonic
+# ---------------------------------------------------------------------------
+
+class _UltrasonicWorker(threading.Thread):
+    """
+    Dedicated daemon thread yang membaca sensor HC-SR04 secara kontinu.
+
+    Alasan dipisah ke thread sendiri:
+    - HC-SR04 bisa memblokir hingga 200ms (menunggu echo pulse).
+    - Satu thread di-pin ke pasangan (trig, echo) sehingga tidak ada
+      GPIO contention dengan sensor lain.
+    - Event loop WebSocket hanya perlu read float dari _cache.
+    """
+
+    POLL_INTERVAL = 2.0   # detik antar pembacaan (sinkron dengan push interval)
+    ECHO_TIMEOUT  = 0.1   # timeout echo (100ms = ~1700cm, lebih dari cukup)
+    RETRY_BASE    = 0.5
+    MAX_FAILURES  = 5
+    MAX_COOLDOWN  = 60.0
+
+    def __init__(self, trig: int, echo: int):
+        super().__init__(name=f"Ultrasonic-worker-TRIG{trig}", daemon=True)
+        self.trig = trig
+        self.echo = echo
+        self._lock = threading.Lock()
+        self._cache: float = 0.0
+        self._stop_event = threading.Event()
+        self._fail_count = 0
+
+    def stop(self):
+        self._stop_event.set()
+
+    def get(self) -> float:
+        """Non-blocking: kembalikan jarak terakhir dalam cm."""
+        with self._lock:
+            return self._cache
+
+    def _read_raw(self) -> float:
+        _gpio = get_gpio_lib()
+        if not _gpio:
+            return 0.0
+
+        c_trig, o_trig = get_gpio(self.trig)
+        c_echo, o_echo = get_gpio(self.echo)
+        if not c_trig or not c_echo:
+            return 0.0
+
+        try:
+            _gpio.gpio_free(c_trig, o_trig)
+            _gpio.gpio_free(c_echo, o_echo)
+        except Exception:
+            pass
+
+        try:
+            _gpio.gpio_claim_output(c_trig, o_trig)
+            _gpio.gpio_claim_input(c_echo, o_echo, getattr(_gpio, 'SET_PULL_DOWN', 1))
+
+            # Settle
+            _gpio.gpio_write(c_trig, o_trig, 0)
+            time.sleep(0.002)
+
+            # 10µs trigger pulse
+            _gpio.gpio_write(c_trig, o_trig, 1)
+            time.sleep(0.00001)
+            _gpio.gpio_write(c_trig, o_trig, 0)
+
+            # Tunggu echo HIGH
+            deadline = time.time() + self.ECHO_TIMEOUT
+            while _gpio.gpio_read(c_echo, o_echo) == 0:
+                if time.time() > deadline:
+                    return 0.0
+            pulse_start = time.time()
+
+            # Tunggu echo LOW
+            deadline = time.time() + self.ECHO_TIMEOUT
+            while _gpio.gpio_read(c_echo, o_echo) == 1:
+                if time.time() > deadline:
+                    return 0.0
+            pulse_end = time.time()
+
+            dist = ((pulse_end - pulse_start) * 34300) / 2.0
+            return round(min(dist, 400.0), 1)
+
+        except Exception as e:
+            logger.debug(f"Ultrasonic TRIG{self.trig} error: {e}")
+            return 0.0
+        finally:
+            try:
+                _gpio.gpio_free(c_trig, o_trig)
+                _gpio.gpio_free(c_echo, o_echo)
+            except Exception:
+                pass
+
+    def run(self):
+        logger.info(f"Ultrasonic worker started for TRIG GPIO{self.trig} / ECHO GPIO{self.echo}")
+        while not self._stop_event.is_set():
+            dist = self._read_raw()
+            with self._lock:
+                if dist > 0.0:  # Valid reading (assuming 0.0 is failure/timeout)
+                    self._cache = dist
+                    self._fail_count = 0
+                    sleep_s = self.POLL_INTERVAL
+                    logger.debug(f"Ultrasonic TRIG{self.trig}: {dist} cm")
+                else:
+                    self._fail_count += 1
+                    if self._fail_count >= self.MAX_FAILURES:
+                        sleep_s = self.MAX_COOLDOWN
+                        logger.warning(f"Ultrasonic TRIG{self.trig} failed {self._fail_count} times, pausing for {sleep_s}s")
+                    else:
+                        sleep_s = self.RETRY_BASE * (2 ** (self._fail_count - 1))
+                        logger.debug(f"Ultrasonic TRIG{self.trig} failed, backoff {sleep_s}s (fail {self._fail_count})")
+                        
+            self._stop_event.wait(timeout=sleep_s)
+
+        logger.info(f"Ultrasonic worker stopped for TRIG GPIO{self.trig}")
+
+
+# ---------------------------------------------------------------------------
+# Registry worker: satu instance per pin agar tidak dobel
+# ---------------------------------------------------------------------------
+
+_dht_workers: dict[int, _DHTWorker] = {}
+_dht_workers_lock = threading.Lock()
+
+_ultrasonic_workers: dict[tuple, _UltrasonicWorker] = {}
+_ultrasonic_workers_lock = threading.Lock()
+
+
+def _get_dht_worker(pin: int) -> _DHTWorker:
+    with _dht_workers_lock:
+        if pin not in _dht_workers:
+            w = _DHTWorker(pin)
+            w.start()
+            _dht_workers[pin] = w
+        return _dht_workers[pin]
+
+
+def _get_ultrasonic_worker(trig: int, echo: int) -> _UltrasonicWorker:
+    key = (trig, echo)
+    with _ultrasonic_workers_lock:
+        if key not in _ultrasonic_workers:
+            w = _UltrasonicWorker(trig, echo)
+            w.start()
+            _ultrasonic_workers[key] = w
+        return _ultrasonic_workers[key]
+
+
+def stop_all_workers():
+    """Hentikan semua background worker (dipanggil saat shutdown)."""
+    with _dht_workers_lock:
+        for w in _dht_workers.values():
+            w.stop()
+        _dht_workers.clear()
+    with _ultrasonic_workers_lock:
+        for w in _ultrasonic_workers.values():
+            w.stop()
+        _ultrasonic_workers.clear()
+
+
+# ---------------------------------------------------------------------------
+# SensorHAL
+# ---------------------------------------------------------------------------
+
 class SensorHAL:
     def __init__(self):
-        self._in_pins  = {}   # { pin: pull_mode } agar bisa re-claim jika mode berbeda
-        self._dht_cache = {}
-        self._dht_lock = threading.Lock()  # Cegah race condition concurrent DHT read
+        self._in_pins = {}   # { pin: pull_mode }
+
+    # ------------------------------------------------------------------
+    # Helper: claim input pin (untuk sensor digital sederhana)
+    # ------------------------------------------------------------------
 
     def _claim_in(self, chip, offset, p_name, pull=0):
         _gpio = get_gpio_lib()
-        if not _gpio: return
+        if not _gpio:
+            return
 
         if self._in_pins.get(p_name) == pull:
             return
@@ -36,10 +322,12 @@ class SensorHAL:
 
     def _read_raw(self, p, pull=0):
         _gpio = get_gpio_lib()
-        if not _gpio: return None
+        if not _gpio:
+            return None
 
         chip, offset = get_gpio(p)
-        if not chip: return None
+        if not chip:
+            return None
 
         self._claim_in(chip, offset, p, pull)
         try:
@@ -47,27 +335,24 @@ class SensorHAL:
         except Exception:
             return None
 
+    # ------------------------------------------------------------------
+    # Sensor digital sederhana (non-blocking, GPIO read instan)
+    # ------------------------------------------------------------------
+
     def read_gas(self, p=5):
-        """MQ Gas sensor: active-low (DO LOW saat gas terdeteksi, modul LM393).
-        Default GPIO 5 (bukan 17, untuk menghindari konflik dengan PIR1).
-        """
+        """MQ Gas sensor: active-low. Default GPIO 5 (tidak konflik dengan PIR GPIO17)."""
         raw = self._read_raw(p, pull=0)
         return (raw == 0) if raw is not None else False
 
     def read_motion(self, p=27):
-        """
-        PIR sensor: active-high.
-        Menggunakan SET_PULL_DOWN agar pin tidak floating saat sensor idle.
-        Idle  = pin LOW  → False
-        Gerak = pin HIGH → True
-        """
+        """PIR sensor: active-high dengan pull-down."""
         _gpio = get_gpio_lib()
         pull_down = getattr(_gpio, 'SET_PULL_DOWN', 1) if _gpio else 1
         raw = self._read_raw(p, pull=pull_down)
         return bool(raw) if raw is not None else False
 
     def read_ir_obstacle(self, p=25):
-        """IR obstacle sensor. Default GPIO 25 (bukan 23, untuk hindari konflik ultrasonic TRIG)."""
+        """IR obstacle: active-low. Default GPIO 25 (tidak konflik ultrasonic TRIG GPIO23)."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
@@ -91,192 +376,38 @@ class SensorHAL:
         raw = self._read_raw(p, pull=pull_up)
         return 100 if raw == 0 else 0
 
-    def _read_dht22_lgpio(self, p):
+    # ------------------------------------------------------------------
+    # DHT22 — non-blocking: hanya baca cache dari background worker
+    # ------------------------------------------------------------------
+
+    def read_temperature(self, p=4) -> float:
         """
-        Implementasi native bit-banging DHT22 dengan lgpio murni.
-        Dilindungi oleh _dht_lock agar thread-safe.
+        Non-blocking. Membaca suhu dari cache DHT22 worker.
+        Worker thread akan otomatis di-spawn saat pertama kali dipanggil.
+        Return None jika belum ada data valid (worker baru mulai).
         """
-        _gpio = get_gpio_lib()
-        if not _gpio: return None, None
+        worker = _get_dht_worker(p)
+        val = worker.get("temperature")
+        return val if val is not None else 0
 
-        chip, offset = get_gpio(p)
-        if not chip: return None, None
+    def read_humidity(self, p=4) -> float:
+        """
+        Non-blocking. Membaca kelembaban dari cache DHT22 worker.
+        Berbagi worker yang sama dengan read_temperature() — tidak ada
+        double read untuk satu pin.
+        """
+        worker = _get_dht_worker(p)
+        val = worker.get("humidity")
+        return val if val is not None else 0
 
-        # Bebaskan pin dan lupakan dari registry claim sementara
-        try:
-            _gpio.gpio_free(chip, offset)
-        except Exception:
-            pass
-        self._in_pins.pop(p, None)
+    # ------------------------------------------------------------------
+    # HC-SR04 Ultrasonic — non-blocking: hanya baca cache dari worker
+    # ------------------------------------------------------------------
 
-        try:
-            # 1. Kirim START Signal: claim output HIGH, pull LOW 2ms, lepas HIGH
-            _gpio.gpio_claim_output(chip, offset, 1)
-            time.sleep(0.01)
-            _gpio.gpio_write(chip, offset, 0)
-            time.sleep(0.002)  # 2ms (cukup untuk DHT11 maupun DHT22)
-            _gpio.gpio_write(chip, offset, 1)
-            time.sleep(0.00004)  # Hold HIGH 40µs sebelum switch ke input
-
-            # 2. Switch pin jadi input untuk mendengarkan balasan sensor
-            _gpio.gpio_free(chip, offset)
-            _gpio.gpio_claim_input(chip, offset, getattr(_gpio, 'SET_PULL_UP', 0))
-
-            # Fungsi timeout sederhana
-            def wait_for(target_state, timeout_s=0.01):
-                start = time.time()
-                while _gpio.gpio_read(chip, offset) != target_state:
-                    if time.time() - start > timeout_s:
-                        return False
-                return True
-
-            # Tunggu sensor merespon: pull LOW lalu pull HIGH lalu LOW lagi
-            if not wait_for(0, 0.01): return None, None
-            if not wait_for(1, 0.01): return None, None
-            if not wait_for(0, 0.01): return None, None
-
-            # 3. Baca 40 bit data
-            bits = []
-            for _ in range(40):
-                if not wait_for(1, 0.01): return None, None
-                t_start = time.time()
-                if not wait_for(0, 0.01): return None, None
-                t_high = time.time() - t_start
-                # High signal > 40 microseconds adalah bit 1, kurang dari itu adalah bit 0
-                bits.append(1 if t_high > 0.000040 else 0)
-
-            # 4. Parsing dan Checksum
-            if len(bits) != 40: return None, None
-
-            def bits_to_int(start_idx, end_idx):
-                res = 0
-                for bit in bits[start_idx:end_idx]:
-                    res = (res << 1) | bit
-                return res
-
-            h_int = bits_to_int(0, 8)
-            h_dec = bits_to_int(8, 16)
-            # bit[16] adalah sign bit; magnitude temperature = bits[17..31]
-            sign_bit = bits[16]
-            t_int = bits_to_int(17, 24)  # Fix: skip sign bit dari magnitude
-            t_dec = bits_to_int(24, 32)
-            checksum = bits_to_int(32, 40)
-
-            # Checksum menggunakan byte penuh termasuk sign bit
-            t_byte_full = bits_to_int(16, 24)
-            if ((h_int + h_dec + t_byte_full + t_dec) & 0xFF) != checksum:
-                return None, None
-
-            humidity = h_int + h_dec / 10.0
-            temperature = t_int + t_dec / 10.0
-
-            if sign_bit == 1:
-                temperature = -temperature
-
-            return temperature, humidity
-
-        except Exception as e:
-            logger.error(f"DHT read error on pin {p}: {e}")
-            return None, None
-        finally:
-            try:
-                _gpio.gpio_free(chip, offset)
-            except Exception:
-                pass
-
-    def _get_dht_cached_reading(self, p, key):
-        now = time.time()
-
-        if p not in self._dht_cache:
-            self._dht_cache[p] = {'last_read': 0, 'temperature': 0, 'humidity': 0}
-
-        # Kembalikan cache jika belum lewat 2 detik
-        if now - self._dht_cache[p]['last_read'] < 2.0:
-            return self._dht_cache[p][key]
-
-        # Lock untuk mencegah concurrent read pada pin yang sama
-        with self._dht_lock:
-            # Double-check setelah acquire lock (mungkin sudah diupdate thread lain)
-            now = time.time()
-            if now - self._dht_cache[p]['last_read'] < 2.0:
-                return self._dht_cache[p][key]
-
-            temp, hum = self._read_dht22_lgpio(p)
-
-            if temp is not None and hum is not None:
-                self._dht_cache[p]['temperature'] = temp
-                self._dht_cache[p]['humidity'] = hum
-                self._dht_cache[p]['last_read'] = now
-            else:
-                # Pada kegagalan, cooldown lebih pendek (0.5s) agar tidak spam tapi juga
-                # tidak membuat sensor terlalu lama mengembalikan nilai stale.
-                self._dht_cache[p]['last_read'] = now - 1.5
-                logger.warning(f"DHT read failed on pin {p}, cached value: {self._dht_cache[p][key]}")
-
-        return self._dht_cache[p][key]
-
-    def read_temperature(self, p=4):
-        return self._get_dht_cached_reading(p, 'temperature')
-
-    def read_humidity(self, p=4):
-        return self._get_dht_cached_reading(p, 'humidity')
-
-    def read_ultrasonic(self, trig=23, echo=24):
-        _gpio = get_gpio_lib()
-        if not _gpio: return 0
-
-        c_trig, o_trig = get_gpio(trig)
-        c_echo, o_echo = get_gpio(echo)
-
-        if not c_trig or not c_echo: return 0
-
-        try:
-            _gpio.gpio_free(c_trig, o_trig)
-            _gpio.gpio_free(c_echo, o_echo)
-        except Exception:
-            pass
-
-        try:
-            _gpio.gpio_claim_output(c_trig, o_trig)
-            _gpio.gpio_claim_input(c_echo, o_echo, getattr(_gpio, 'SET_PULL_DOWN', 1))
-
-            _gpio.gpio_write(c_trig, o_trig, 0)
-            time.sleep(0.002)
-
-            _gpio.gpio_write(c_trig, o_trig, 1)
-            time.sleep(0.00001)  # 10us pulse
-            _gpio.gpio_write(c_trig, o_trig, 0)
-
-            # Tunggu echo naik HIGH
-            t_timeout = time.time() + 0.1
-            pulse_start = time.time()
-            while _gpio.gpio_read(c_echo, o_echo) == 0:
-                pulse_start = time.time()
-                if pulse_start > t_timeout:
-                    return 0
-
-            # Tunggu echo turun LOW
-            t_timeout = time.time() + 0.1
-            pulse_end = time.time()
-            while _gpio.gpio_read(c_echo, o_echo) == 1:
-                pulse_end = time.time()
-                if pulse_end > t_timeout:
-                    return 0
-
-            duration = pulse_end - pulse_start
-            distance_cm = (duration * 34300) / 2.0
-
-            if distance_cm > 400:
-                return 400
-
-            return round(distance_cm, 1)
-
-        except Exception as e:
-            logger.error(f"Ultrasonic error (trig={trig}, echo={echo}): {e}")
-            return 0
-        finally:
-            try:
-                _gpio.gpio_free(c_trig, o_trig)
-                _gpio.gpio_free(c_echo, o_echo)
-            except Exception:
-                pass
+    def read_ultrasonic(self, trig=23, echo=24) -> float:
+        """
+        Non-blocking. Membaca jarak dari cache ultrasonic worker.
+        Worker thread akan otomatis di-spawn saat pertama kali dipanggil.
+        """
+        worker = _get_ultrasonic_worker(trig, echo)
+        return worker.get()

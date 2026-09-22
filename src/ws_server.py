@@ -8,6 +8,7 @@ import websockets
 import traceback
 
 from hal import sensor, motor, led, power, rfid, telemetry, pin, audio, display, motion, lan, ai
+from hal.sensor import stop_all_workers
 
 # Wrapper global untuk proxy
 class HalProxy:
@@ -74,15 +75,19 @@ def _gather_telemetry():
     }
 
 
-async def push_telemetry_loop(interval=1.0):
-    """Loop for periodically pushing real sensor data to subscribed clients."""
+async def push_telemetry_loop(interval=2.0):
+    """Loop for periodically pushing real sensor data to subscribed clients.
+    
+    Semua sensor reads bersifat non-blocking karena DHT22 dan ultrasonic
+    sudah berjalan di background worker threads masing-masing. Push loop
+    ini hanya membaca nilai cache dan mengirim ke klien — tidak ada blocking
+    GPIO I/O di sini sehingga event loop WebSocket tidak pernah tertunda.
+    """
     while True:
-        # Check if flutter explicitly started it or if they subscribed
         if subscribed_clients and getattr(telemetry, '_running', False):
             try:
-                # Jalankan semua blocking sensor I/O di thread pool
-                # agar tidak memblokir event loop WebSocket
-                telemetry_data = await asyncio.to_thread(_gather_telemetry)
+                # Semua panggilan di bawah non-blocking (baca cache dari worker thread)
+                telemetry_data = _gather_telemetry()
 
                 payload = {
                     "type": "telemetry",
@@ -271,3 +276,4 @@ async def start_server(host="0.0.0.0", port=9002):
                 await asyncio.gather(telemetry_task, adhoc_task, return_exceptions=True)
             except Exception:
                 pass
+            stop_all_workers()
