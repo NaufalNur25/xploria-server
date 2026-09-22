@@ -186,8 +186,19 @@ async def handler(websocket):
                 if data.get("type") == "run":
                     code = data.get("code", "")
                     loop = asyncio.get_running_loop()
-                    response = await asyncio.to_thread(execute_python_code, code, websocket, loop)
-                    await websocket.send(json.dumps(response))
+                    
+                    # Fungsi untuk menjalankan eksekusi dan mengirim hasil akhir
+                    async def run_in_background():
+                        # Pastikan flag reset saat mulai
+                        setattr(websocket, 'stop_requested', False)
+                        response = await asyncio.to_thread(execute_python_code, code, websocket, loop)
+                        try:
+                            await websocket.send(json.dumps(response))
+                        except Exception:
+                            pass
+                            
+                    # Spawn sebagai task agar TIDAK MEMBLOKIR pembacaan pesan websocket (seperti "stop")
+                    asyncio.create_task(run_in_background())
                     continue
                     
                 cmd = data.get("command")
@@ -227,7 +238,7 @@ async def handler(websocket):
         subscribed_clients.discard(websocket)
         logging.info(f"Client disconnected: {client_addr}")
 
-async def start_server(host="0.0.0.0", port=8765):
+async def start_server(host="0.0.0.0", port=9002):
     telemetry._ensure_queue()
     
     asyncio.create_task(push_telemetry_loop())
