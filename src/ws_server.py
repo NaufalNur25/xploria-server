@@ -77,9 +77,21 @@ async def adhoc_telemetry_loop():
             websockets.broadcast(connected_clients, msg)
         telemetry._queue.task_done()
 
+class StopExecution(Exception):
+    pass
+
 def execute_python_code(code_str, client_ws, loop):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
+    
+    # Flag to signal stopping
+    setattr(client_ws, 'stop_requested', False)
+    
+    def check_stop():
+        if getattr(client_ws, 'stop_requested', False):
+            raise StopExecution("Execution stopped by user")
+
     def custom_print(*args, **kwargs):
+        check_stop()
         sep = kwargs.get('sep', ' ')
         end = kwargs.get('end', '\n')
         msg = sep.join(str(a) for a in args) + end
@@ -93,6 +105,27 @@ def execute_python_code(code_str, client_ws, loop):
         import time
         time.sleep(0.05)
         
+    import time
+    original_sleep = time.sleep
+    
+    def custom_sleep(secs):
+        check_stop()
+        # Jika sleep-nya panjang, kita bagi-bagi agar bisa di-interupsi
+        if secs > 0.1:
+            end_time = time.time() + secs
+            while time.time() < end_time:
+                check_stop()
+                original_sleep(0.1)
+        else:
+            original_sleep(secs)
+        check_stop()
+
+    # Buat modul virtual time kustom agar sleep bisa di-intercept
+    import types
+    custom_time = types.ModuleType("time")
+    custom_time.__dict__.update(time.__dict__)
+    custom_time.sleep = custom_sleep
+
     exec_globals = {
         "__builtins__": __builtins__,
         "sensor": sensor,
@@ -107,7 +140,7 @@ def execute_python_code(code_str, client_ws, loop):
         "motion": motion,
         "lan": lan,
         "ai": ai,
-        "time": __import__("time"),
+        "time": custom_time,
         "math": __import__("math"),
         "print": custom_print,
     }
@@ -115,6 +148,8 @@ def execute_python_code(code_str, client_ws, loop):
     try:
         exec(code_str, exec_globals)
         return {"type": "output", "payload": "\n[Proses Selesai]"}
+    except StopExecution:
+        return {"type": "output", "payload": "\n[Proses Dihentikan]"}
     except Exception as e:
         return {"type": "error", "payload": traceback.format_exc()}
 
@@ -135,9 +170,15 @@ async def handler(websocket):
                     response = await asyncio.to_thread(execute_python_code, code, websocket, loop)
                     await websocket.send(json.dumps(response))
                     continue
-
+                    
                 cmd = data.get("command")
                 msg_type = data.get("type")
+                
+                if msg_type == "stop" or cmd == "stop":
+                    setattr(websocket, 'stop_requested', True)
+                    response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
+                    await websocket.send(json.dumps(response))
+                    continue
                 
                 if cmd == "subscribe_telemetry" or msg_type == "subscribe_telemetry":
                     subscribed_clients.add(websocket)
