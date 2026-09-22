@@ -5,22 +5,12 @@ from .core import get_gpio, get_gpio_lib
 class SensorHAL:
     def __init__(self):
         self._in_pins  = {}   # { pin: pull_mode } agar bisa re-claim jika mode berbeda
-        self._dht_pins = {}
         self._dht_cache = {}
 
     def _claim_in(self, chip, offset, p_name, pull=0):
-        """
-        Klaim pin sebagai input.
-        pull=0           → no pull (untuk active-high seperti MQ gas, PIR)
-        pull=SET_PULL_UP → internal pull-up (untuk active-low seperti soil, IR)
-        
-        PENTING: SET_PULL_UP pada sensor active-high akan menyebabkan nilai
-        selalu True karena pin di-pull ke HIGH saat sensor tidak aktif.
-        """
         _gpio = get_gpio_lib()
         if not _gpio: return
 
-        # Re-claim jika pull mode berubah
         if self._in_pins.get(p_name) == pull:
             return
 
@@ -41,7 +31,6 @@ class SensorHAL:
         print(f"[xploria_hal] Failed to claim input pin {p_name} pull={pull}: {err}", file=sys.stderr)
 
     def _read_raw(self, p, pull=0):
-        """Baca nilai raw GPIO (0 atau 1) dengan pull mode yang ditentukan."""
         _gpio = get_gpio_lib()
         if not _gpio: return None
 
@@ -72,69 +61,144 @@ class SensorHAL:
         return bool(raw) if raw is not None else False
 
     def read_ir_obstacle(self, p=23):
-        """IR obstacle: active-low (output LOW saat ada halangan)."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
         return (raw == 0) if raw is not None else False
 
     def read_soil_moisture(self, p=22):
-        """Soil moisture: active-low (output LOW saat lembab)."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
         return (raw == 0) if raw is not None else False
 
     def read_line(self, p=25):
-        """Line sensor: active-low untuk garis hitam."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
         return 'BLACK' if raw == 0 else 'WHITE'
 
     def read_light(self, p=24):
-        """LDR: active-low (output LOW saat ada cahaya)."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
         return 100 if raw == 0 else 0
 
-    def _get_dht_cached_reading(self, p, key):
+    def _read_dht22_lgpio(self, p):
         """
-        Membaca DHT22 via adafruit_dht dengan cache throttle 2 detik.
-        DHT22 default pin adalah 4 sesuai wiring fisik aktual.
+        Implementasi native bit-banging DHT22 dengan lgpio murni.
+        Sangat anti-crash: tidak menggunakan library blinka, tidak ada IPC queue,
+        timeout yang jelas sehingga tidak bisa hang.
         """
-        now = time.time()
+        _gpio = get_gpio_lib()
+        if not _gpio: return None, None
 
+        chip, offset = get_gpio(p)
+        if not chip: return None, None
+
+        # Bebaskan pin dan lupakan dari registry claim sementara
+        try:
+            _gpio.gpio_free(chip, offset)
+        except Exception:
+            pass
+        self._in_pins.pop(p, None)
+
+        try:
+            # 1. Kirim START Signal (LOW 2ms lalu HIGH dan lepas)
+            _gpio.gpio_claim_output(chip, offset, getattr(_gpio, 'SET_PULL_UP', 0), 1)
+            time.sleep(0.01)
+            _gpio.gpio_write(chip, offset, 0)
+            time.sleep(0.002) # 2 milidetik (cukup untuk DHT11 maupun DHT22)
+            _gpio.gpio_write(chip, offset, 1)
+
+            # 2. Switch pin jadi input untuk mendengarkan balasan sensor
+            _gpio.gpio_free(chip, offset)
+            _gpio.gpio_claim_input(chip, offset, getattr(_gpio, 'SET_PULL_UP', 0))
+
+            # Fungsi timeout sederhana (aman dari IPC blocking)
+            def wait_for(target_state, timeout_s=0.01):
+                start = time.time()
+                while _gpio.gpio_read(chip, offset) != target_state:
+                    if time.time() - start > timeout_s:
+                        return False
+                return True
+
+            # Tunggu sensor merespon: pull LOW lalu pull HIGH
+            if not wait_for(0, 0.01): return None, None
+            if not wait_for(1, 0.01): return None, None
+            if not wait_for(0, 0.01): return None, None
+
+            # 3. Baca 40 bit data
+            bits = []
+            for _ in range(40):
+                # Tunggu sinyal mulai LOW (selesai masa HIGH tunggu)
+                if not wait_for(1, 0.01): return None, None
+                
+                # Hitung durasi sinyal HIGH (ini yang menentukan bit 0 atau 1)
+                t_start = time.time()
+                if not wait_for(0, 0.01): return None, None
+                t_high = time.time() - t_start
+
+                # High signal > 40 microseconds adalah 1, kalau tidak 0
+                bits.append(1 if t_high > 0.000040 else 0)
+
+            # 4. Parsing dan Checksum
+            if len(bits) != 40: return None, None
+
+            def bits_to_int(start_idx, end_idx):
+                res = 0
+                for bit in bits[start_idx:end_idx]:
+                    res = (res << 1) | bit
+                return res
+
+            h_int = bits_to_int(0, 8)
+            h_dec = bits_to_int(8, 16)
+            t_int = bits_to_int(16, 24)
+            t_dec = bits_to_int(24, 32)
+            checksum = bits_to_int(32, 40)
+
+            if ((h_int + h_dec + t_int + t_dec) & 0xFF) != checksum:
+                return None, None
+
+            humidity = h_int + h_dec / 10.0
+            temperature = t_int + t_dec / 10.0
+
+            # Suhu negatif
+            if bits[16] == 1:
+                temperature = -temperature
+
+            return temperature, humidity
+
+        except Exception:
+            return None, None
+        finally:
+            try:
+                _gpio.gpio_free(chip, offset)
+            except Exception:
+                pass
+
+    def _get_dht_cached_reading(self, p, key):
+        now = time.time()
+        
         if p not in self._dht_cache:
             self._dht_cache[p] = {'last_read': 0, 'temperature': 0, 'humidity': 0}
 
+        # Kembalikan cache jika belum lewat 2 detik
         if now - self._dht_cache[p]['last_read'] < 2.0:
             return self._dht_cache[p][key]
 
-        try:
-            import adafruit_dht, board
-            if p not in self._dht_pins:
-                self._dht_pins[p] = adafruit_dht.DHT22(getattr(board, f'D{p}'))
+        temp, hum = self._read_dht22_lgpio(p)
 
-            val_temp = self._dht_pins[p].temperature
-            val_hum  = self._dht_pins[p].humidity
+        if temp is not None and hum is not None:
+            self._dht_cache[p]['temperature'] = temp
+            self._dht_cache[p]['humidity'] = hum
+            self._dht_cache[p]['last_read'] = now
 
-            if val_temp is not None:
-                self._dht_cache[p]['temperature'] = val_temp
-            if val_hum is not None:
-                self._dht_cache[p]['humidity'] = val_hum
+        # Tetap update timestamp meskipun gagal, agar tidak memborbardir pin yang mati
+        # dengan polling berturut-turut tanpa jeda
+        if temp is None:
+            self._dht_cache[p]['last_read'] = now
 
-        except Exception as e:
-            print(f"[xploria_hal] DHT error pin {p}: {e}", file=sys.stderr)
-            if p in self._dht_pins:
-                try:
-                    self._dht_pins[p].exit()
-                except Exception:
-                    pass
-                del self._dht_pins[p]
-
-        self._dht_cache[p]['last_read'] = now
         return self._dht_cache[p][key]
 
     def read_temperature(self, p=4):
