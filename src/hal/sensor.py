@@ -51,45 +51,81 @@ class SensorHAL:
     def read_soil_moisture(self, p=22):
         return self._read_digital_bool(p, active_high=False)
 
+    def _release_lgpio_pin(self, p):
+        """
+        Bebaskan klaim lgpio pada pin p sebelum adafruit_dht menggunakannya.
+        lgpio dan adafruit_dht (libgpiod/pulseio) tidak bisa memegang pin yang sama
+        secara bersamaan — salah satunya harus melepas klaim terlebih dahulu.
+        """
+        from .core import get_gpio, get_gpio_lib
+        _gpio = get_gpio_lib()
+        if not _gpio:
+            return
+        chip, offset = get_gpio(p)
+        if not chip:
+            return
+        try:
+            _gpio.gpio_free(chip, offset)
+        except Exception:
+            pass
+        # Hapus dari set agar bisa di-claim ulang oleh lgpio jika perlu nanti
+        self._in_pins.discard(p)
+
     def _get_dht_cached_reading(self, p, key):
-        """Helper internal untuk membaca DHT dengan throttle 2 detik (hardware limit)"""
+        """
+        Membaca DHT22 dengan:
+        1. Throttle 2 detik (hardware limit DHT22)
+        2. Melepas klaim lgpio sebelum adafruit_dht membaca
+        3. Tidak memanggil .measure() yang tidak ada di adafruit_dht
+        """
         now = time.time()
-        
-        # Inisialisasi struktur cache jika belum ada
+
+        # Inisialisasi cache jika belum ada
         if p not in self._dht_cache:
             self._dht_cache[p] = {'last_read': 0, 'temperature': 0, 'humidity': 0}
-            
-        # DHT22 hardware butuh waktu 2 detik antar pembacaan
+
+        # Kembalikan nilai cache jika belum waktunya baca hardware lagi
         if now - self._dht_cache[p]['last_read'] < 2.0:
             return self._dht_cache[p][key]
-            
+
+        # Bebaskan pin dari lgpio SEBELUM adafruit_dht mencoba menggunakannya
+        self._release_lgpio_pin(p)
+
         try:
             import adafruit_dht, board
+
             if p not in self._dht_pins:
-                # Menggunakan fallback D4 jika pin tidak ditemukan di modul board
-                pin_attr = getattr(board, f'D{p}', getattr(board, 'D4', None))
+                pin_attr = getattr(board, f'D{p}', None)
+                if pin_attr is None:
+                    print(f"[xploria_hal] board.D{p} tidak ditemukan", file=sys.stderr)
+                    return self._dht_cache[p][key]
                 self._dht_pins[p] = adafruit_dht.DHT22(pin_attr)
-                
-            try:
-                # Coba baca sensor
-                self._dht_pins[p].measure()
-                val_temp = self._dht_pins[p].temperature
-                val_hum = self._dht_pins[p].humidity
-                
-                # Update cache dengan data yang valid
-                self._dht_cache[p]['temperature'] = val_temp if val_temp is not None else self._dht_cache[p]['temperature']
-                self._dht_cache[p]['humidity'] = val_hum if val_hum is not None else self._dht_cache[p]['humidity']
-                
-            except Exception as read_err:
-                # DHT membaca bisa gagal karena timing issues, fallback ke cache terakhir
-                pass
-                
+
+            # adafruit_dht TIDAK memiliki .measure() — langsung baca property
+            val_temp = self._dht_pins[p].temperature
+            val_hum  = self._dht_pins[p].humidity
+
+            if val_temp is not None:
+                self._dht_cache[p]['temperature'] = val_temp
+            if val_hum is not None:
+                self._dht_cache[p]['humidity'] = val_hum
+
             self._dht_cache[p]['last_read'] = now
-            return self._dht_cache[p][key]
-            
+
         except Exception as e:
-            # Jika hardware pin error parah (tidak root, i2c tertutup, dll)
-            return self._dht_cache[p][key]
+            # Catat error ke stderr agar bisa di-debug, tapi tetap return cache terakhir
+            print(f"[xploria_hal] DHT error pin {p}: {e}", file=sys.stderr)
+            # Reset instance DHT yang mungkin rusak agar percobaan berikutnya membuat ulang
+            if p in self._dht_pins:
+                try:
+                    self._dht_pins[p].exit()
+                except Exception:
+                    pass
+                del self._dht_pins[p]
+            # Tetap update last_read agar tidak spam hardware saat error berturut-turut
+            self._dht_cache[p]['last_read'] = now
+
+        return self._dht_cache[p][key]
 
     def read_temperature(self, p=4):
         return self._get_dht_cached_reading(p, 'temperature')
