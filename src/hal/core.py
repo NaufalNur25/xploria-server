@@ -12,8 +12,34 @@ except ImportError:
     _gpio = None
     print("[xploria_hal] WARNING: lgpio tidak ditemukan - GPIO fisik tidak akan berfungsi.", file=sys.stderr)
 
-_PIN_MAP = {}
+try:
+    from database import init_db, get_all_pin_mappings
+    init_db()
+    _PIN_MAP = get_all_pin_mappings()
+except ImportError:
+    try:
+        from src.database import init_db, get_all_pin_mappings
+        init_db()
+        _PIN_MAP = get_all_pin_mappings()
+    except ImportError:
+        _PIN_MAP = {}
+        print("[xploria_hal] WARNING: database module tidak ditemukan. _PIN_MAP kosong.", file=sys.stderr)
+
 _chips = {}
+
+def reload_pin_map():
+    global _PIN_MAP
+    try:
+        from database import get_all_pin_mappings
+        _PIN_MAP = get_all_pin_mappings()
+        print(f"[xploria_hal] _PIN_MAP reloaded: {_PIN_MAP}")
+    except ImportError:
+        try:
+            from src.database import get_all_pin_mappings
+            _PIN_MAP = get_all_pin_mappings()
+            print(f"[xploria_hal] _PIN_MAP reloaded: {_PIN_MAP}")
+        except ImportError:
+            pass
 
 def get_gpio(p):
     if not _gpio:

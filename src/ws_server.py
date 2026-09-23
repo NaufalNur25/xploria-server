@@ -246,6 +246,39 @@ async def handler(websocket):
                     await websocket.send(json.dumps(response))
                     continue
 
+                if msg_type == "pin_mapping" or cmd == "pin_mapping":
+                    action = data.get("action")
+                    if action == "reload":
+                        try:
+                            from hal.core import reload_pin_map
+                            reload_pin_map()
+                            response = {"type": "ack", "command": "pin_mapping", "action": "reload", "status": "ok"}
+                        except Exception as e:
+                            response = {"type": "ack", "command": "pin_mapping", "action": "reload", "status": "error", "message": str(e)}
+                        await websocket.send(json.dumps(response))
+                    elif action == "set":
+                        logical = data.get("logical_pin")
+                        physical = data.get("physical_pin")
+                        desc = data.get("description", "")
+                        try:
+                            from database import update_pin_mapping
+                            update_pin_mapping(int(logical), int(physical), desc)
+                            from hal.core import reload_pin_map
+                            reload_pin_map()
+                            response = {"type": "ack", "command": "pin_mapping", "action": "set", "status": "ok"}
+                        except Exception as e:
+                            response = {"type": "ack", "command": "pin_mapping", "action": "set", "status": "error", "message": str(e)}
+                        await websocket.send(json.dumps(response))
+                    elif action == "list":
+                        try:
+                            from database import get_all_pin_mappings
+                            mappings = get_all_pin_mappings()
+                            response = {"type": "pin_mapping_list", "data": mappings}
+                        except Exception as e:
+                            response = {"type": "error", "message": str(e)}
+                        await websocket.send(json.dumps(response))
+                    continue
+
                 response = {"type": "ack", "command": data.get("command", "unknown"), "status": "error", "message": "Unknown command"}
                 await websocket.send(json.dumps(response))
 
