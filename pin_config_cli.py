@@ -64,9 +64,10 @@ def main():
     
     # Set command
     set_parser = subparsers.add_parser("set", help="Set a pin mapping (logical to physical)")
-    set_parser.add_argument("logical_pin", type=int, help="The logical pin number (e.g. 1)")
-    set_parser.add_argument("physical_pin", type=int, help="The physical GPIO pin number (e.g. 17)")
+    set_parser.add_argument("logical_pin", type=int, help="The logical pin number (e.g. 4)")
+    set_parser.add_argument("physical_pin", type=int, help="The physical GPIO pin number (e.g. 4)")
     set_parser.add_argument("--desc", type=str, help="Description for this pin", default="")
+    set_parser.add_argument("--force", action="store_true", help="Force overwrite if physical pin is already used")
     
     # Delete command
     delete_parser = subparsers.add_parser("delete", help="Delete a pin mapping")
@@ -81,9 +82,13 @@ def main():
         show_mappings()
         
     elif args.command == "set":
-        update_pin_mapping(args.logical_pin, args.physical_pin, args.desc)
-        print(f"Successfully mapped Logical Pin {args.logical_pin} -> Physical Pin {args.physical_pin}")
-        notify_daemon_sync()
+        try:
+            update_pin_mapping(args.logical_pin, args.physical_pin, args.desc, force=args.force)
+            print(f"Successfully mapped Logical Pin {args.logical_pin} -> Physical Pin {args.physical_pin}")
+            notify_daemon_sync()
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            print("Gunakan argumen --force untuk menimpa konfigurasi yang sudah ada secara paksa.")
         
     elif args.command == "delete":
         delete_pin_mapping(args.logical_pin)
@@ -112,12 +117,23 @@ def interactive_mode():
             
         elif choice == '2':
             try:
-                logical = int(input("Enter Logical Pin (e.g. 1): ").strip())
+                logical = int(input("Enter Logical Pin (e.g. 4): ").strip())
                 physical = int(input(f"Enter Physical Pin for Logical {logical}: ").strip())
                 desc = input("Enter description (optional): ").strip()
-                update_pin_mapping(logical, physical, desc)
-                print(f"Success! Logical Pin {logical} is now mapped to Physical Pin {physical}.")
-                notify_daemon_sync()
+                try:
+                    update_pin_mapping(logical, physical, desc)
+                    print(f"Success! Logical Pin {logical} is now mapped to Physical Pin {physical}.")
+                    notify_daemon_sync()
+                except ValueError as e:
+                    print(f"\n[!] KONFLIK TERDETEKSI:")
+                    print(str(e))
+                    ans = input("Apakah Anda ingin merebut/memindahkan pin ini secara paksa? (Y/N): ").strip().lower()
+                    if ans == 'y':
+                        update_pin_mapping(logical, physical, desc, force=True)
+                        print(f"Success (Forced)! Logical Pin {logical} mapped to Physical Pin {physical}.")
+                        notify_daemon_sync()
+                    else:
+                        print("Dibatalkan.")
             except ValueError:
                 print("Error: Pin numbers must be integers.")
                 

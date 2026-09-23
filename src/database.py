@@ -48,8 +48,23 @@ def get_all_pin_mappings():
     db.close()
     return mappings
 
-def update_pin_mapping(logical_pin, physical_pin, description=None):
+def update_pin_mapping(logical_pin, physical_pin, description=None, force=False):
     db.connect(reuse_if_open=True)
+    
+    # Pencegahan Level 1: Cek tabrakan Physical Pin
+    existing = PinMapping.select().where(
+        (PinMapping.physical_pin == physical_pin) & 
+        (PinMapping.logical_pin != logical_pin)
+    ).first()
+    
+    if existing and not force:
+        db.close()
+        raise ValueError(f"Pin Fisik {physical_pin} sudah digunakan oleh Logical Pin {existing.logical_pin} ({existing.description}).")
+        
+    if existing and force:
+        # Hapus pemetaan yang bertabrakan agar physical pin bisa direbut
+        existing.delete_instance()
+    
     mapping, created = PinMapping.get_or_create(logical_pin=logical_pin, defaults={'physical_pin': physical_pin, 'description': description or ""})
     if not created:
         mapping.physical_pin = physical_pin
