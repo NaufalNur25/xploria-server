@@ -297,20 +297,19 @@ class SensorHAL:
     def _init_ads(self):
         if not self._ads_initialized:
             try:
-                import board
                 import busio
+                import board
                 import adafruit_ads1x15.ads1115 as ADS
-                from adafruit_ads1x15.analog_in import AnalogIn
-                
-                # Menggunakan board.I2C() agar bisa berbagi (share) bus dengan modul lain seperti RFID
-                i2c = board.I2C()
+
+                # Identik dengan custom script yang sudah terbukti jalan
+                i2c = busio.I2C(board.SCL, board.SDA)
                 self._ads = ADS.ADS1115(i2c)
                 self._ads_initialized = True
-                logger.info("ADS1115 initialized successfully for Analog Sensors (LDR GL5528)")
+                logger.info("ADS1115 initialized successfully (LDR GL5528 via A0)")
             except Exception as e:
                 self._ads = None
-                self._ads_initialized = True # Mark as tried
-                logger.warning(f"ADS1115 init failed (Analog Sensors disabled): {e}")
+                self._ads_initialized = False  # Izinkan retry pada panggilan berikutnya
+                logger.error(f"ADS1115 init FAILED: {type(e).__name__}: {e}")
         return self._ads
 
     # ------------------------------------------------------------------
@@ -402,27 +401,21 @@ class SensorHAL:
             ads = self._init_ads()
             if not ads:
                 return 0.0
-                
+
             try:
                 from adafruit_ads1x15.analog_in import AnalogIn
-                import adafruit_ads1x15.ads1115 as ADS
-                
-                # Petakan integer ke pin konstan milik library
-                chan_map = {0: ADS.P0, 1: ADS.P1, 2: ADS.P2, 3: ADS.P3}
-                chan = AnalogIn(ads, chan_map.get(adc_channel, ADS.P0))
-                
-                # Hitung persentase berdasarkan tegangan (Asumsi VCC 3.3V)
-                # Raw voltage ADS1115 bergantung pada pencahayaan dan R-Divider (umumnya 10k)
-                # Semakin terang, resistansi LDR GL5528 menurun, V_out berubah.
+
+                # Identik dengan custom script: AnalogIn(ads, integer_channel)
+                chan = AnalogIn(ads, adc_channel)
                 volts = chan.voltage
-                
+
                 # Normalisasi tegangan (0v - 3.3v) ke persentase (0 - 100)
-                # Jika dirangkai pull-down (GND - 10k - A0 - LDR - VCC), tegangan naik saat terang.
+                # Pull-down 10k: tegangan naik saat terang, turun saat gelap
                 intensity = (volts / 3.3) * 100.0
                 return max(0.0, min(100.0, round(intensity, 1)))
-                
+
             except Exception as e:
-                logger.error(f"Failed to read LDR via ADS1115 channel {adc_channel}: {e}")
+                logger.error(f"LDR read FAILED channel {adc_channel}: {type(e).__name__}: {e}")
                 return 0.0
         else:
             _gpio = get_gpio_lib()

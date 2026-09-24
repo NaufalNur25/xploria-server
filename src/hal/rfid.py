@@ -15,8 +15,7 @@ class RFIDHAL:
                 import busio
                 from adafruit_pn532.i2c import PN532_I2C
 
-                # Menggunakan board.I2C() agar bisa berbagi (share) bus dengan modul ADS1115
-                i2c = board.I2C()
+                i2c = busio.I2C(board.SCL, board.SDA)
                 self._pn532 = PN532_I2C(i2c, debug=False)
                 self._pn532.SAM_configuration()
                 self._initialized = True  # Set True hanya jika berhasil
