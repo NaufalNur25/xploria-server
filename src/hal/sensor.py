@@ -302,7 +302,8 @@ class SensorHAL:
                 import adafruit_ads1x15.ads1115 as ADS
                 from adafruit_ads1x15.analog_in import AnalogIn
                 
-                i2c = busio.I2C(board.SCL, board.SDA)
+                # Menggunakan board.I2C() agar bisa berbagi (share) bus dengan modul lain seperti RFID
+                i2c = board.I2C()
                 self._ads = ADS.ADS1115(i2c)
                 self._ads_initialized = True
                 logger.info("ADS1115 initialized successfully for Analog Sensors (LDR GL5528)")
@@ -390,12 +391,12 @@ class SensorHAL:
         raw = self._read_raw(p, pull=pull_up)
         return 'BLACK' if raw == 0 else 'WHITE'
 
-    def read_light(self, p=24, analog=False, adc_channel=0) -> float:
+    def read_light(self, p=24, analog=True, adc_channel=0) -> float:
         """
         Membaca sensor cahaya (LDR).
-        - Jika analog=False (Default): Membaca Pin Digital (DO) active-low. Mengembalikan 100 atau 0.
-        - Jika analog=True: Membaca LDR GL5528 via I2C ADS1115 (AO). 
+        - Jika analog=True (Default): Membaca LDR GL5528 via I2C ADS1115 (AO). 
           adc_channel (0-3) menentukan pin A0-A3 pada ADS1115. Mengembalikan persentase 0.0 - 100.0%.
+        - Jika analog=False: Membaca Pin Digital (DO) active-low. Mengembalikan 100 atau 0.
         """
         if analog:
             ads = self._init_ads()
