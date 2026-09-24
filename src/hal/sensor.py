@@ -86,7 +86,6 @@ class _DHTWorker(threading.Thread):
             return t, h
         except RuntimeError as e:
             # RuntimeError wajar dilempar oleh adafruit_dht saat gagal baca (checksum, timeout)
-            logger.debug(f"DHT22 pin {self.pin} read error: {e}")
             return None, None
         except Exception as e:
             logger.warning(f"DHT22 pin {self.pin} unexpected error: {e}")
@@ -97,7 +96,6 @@ class _DHTWorker(threading.Thread):
     # ------------------------------------------------------------------
 
     def run(self):
-        logger.info(f"DHT worker started for GPIO {self.pin}")
         while not self._stop_event.is_set():
             t, h = self._read_raw()
 
@@ -106,8 +104,7 @@ class _DHTWorker(threading.Thread):
                     self._cache["temperature"] = t
                     self._cache["humidity"]    = h
                     self._cache["last_ok"]     = time.time()
-                    self._fail_count = 0  # Reset fail count
-                    logger.debug(f"DHT22 GPIO{self.pin}: {t:.1f}°C  {h:.1f}%")
+                    self._fail_count = 0
                     sleep_s = self.DHT22_MIN_INTERVAL
                 else:
                     self._fail_count += 1
@@ -115,13 +112,11 @@ class _DHTWorker(threading.Thread):
                         sleep_s = self.MAX_COOLDOWN
                         logger.warning(f"DHT22 GPIO{self.pin} failed {self._fail_count} times, pausing for {sleep_s}s")
                     else:
-                        sleep_s = self.RETRY_BASE * (2 ** (self._fail_count - 1))  # Exponential backoff
-                        logger.debug(f"DHT22 GPIO{self.pin} failed, backoff {sleep_s}s (fail {self._fail_count})")
+                        sleep_s = self.RETRY_BASE * (2 ** (self._fail_count - 1))
 
             # Tunggu sebelum baca berikutnya; bisa diinterupsi oleh stop()
             self._stop_event.wait(timeout=sleep_s)
 
-        logger.info(f"DHT worker stopped for GPIO {self.pin}")
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +204,6 @@ class _UltrasonicWorker(threading.Thread):
             return round(min(dist, 400.0), 1)
 
         except Exception as e:
-            logger.debug(f"Ultrasonic TRIG{self.trig} error: {e}")
             return 0.0
         finally:
             try:
@@ -219,15 +213,13 @@ class _UltrasonicWorker(threading.Thread):
                 pass
 
     def run(self):
-        logger.info(f"Ultrasonic worker started for TRIG GPIO{self.trig} / ECHO GPIO{self.echo}")
         while not self._stop_event.is_set():
             dist = self._read_raw()
             with self._lock:
-                if dist > 0.0:  # Valid reading (assuming 0.0 is failure/timeout)
+                if dist > 0.0:
                     self._cache = dist
                     self._fail_count = 0
                     sleep_s = self.POLL_INTERVAL
-                    logger.debug(f"Ultrasonic TRIG{self.trig}: {dist} cm")
                 else:
                     self._fail_count += 1
                     if self._fail_count >= self.MAX_FAILURES:
@@ -235,11 +227,9 @@ class _UltrasonicWorker(threading.Thread):
                         logger.warning(f"Ultrasonic TRIG{self.trig} failed {self._fail_count} times, pausing for {sleep_s}s")
                     else:
                         sleep_s = self.RETRY_BASE * (2 ** (self._fail_count - 1))
-                        logger.debug(f"Ultrasonic TRIG{self.trig} failed, backoff {sleep_s}s (fail {self._fail_count})")
-                        
+
             self._stop_event.wait(timeout=sleep_s)
 
-        logger.info(f"Ultrasonic worker stopped for TRIG GPIO{self.trig}")
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +263,18 @@ def _get_ultrasonic_worker(trig: int, echo: int) -> _UltrasonicWorker:
 
 
 def stop_all_workers():
-    """Hentikan semua background worker (dipanggil saat shutdown)."""
+    """Hentikan semua background worker dan tunggu hingga benar-benar selesai."""
     with _dht_workers_lock:
         for w in _dht_workers.values():
             w.stop()
+        for w in _dht_workers.values():
+            w.join(timeout=3)
         _dht_workers.clear()
     with _ultrasonic_workers_lock:
         for w in _ultrasonic_workers.values():
             w.stop()
+        for w in _ultrasonic_workers.values():
+            w.join(timeout=3)
         _ultrasonic_workers.clear()
 
 
@@ -301,14 +295,12 @@ class SensorHAL:
                 import board
                 import adafruit_ads1x15.ads1115 as ADS
 
-                # Identik dengan custom script yang sudah terbukti jalan
                 i2c = busio.I2C(board.SCL, board.SDA)
                 self._ads = ADS.ADS1115(i2c)
                 self._ads_initialized = True
-                logger.info("ADS1115 initialized successfully (LDR GL5528 via A0)")
             except Exception as e:
                 self._ads = None
-                self._ads_initialized = False  # Izinkan retry pada panggilan berikutnya
+                self._ads_initialized = False
                 logger.error(f"ADS1115 init FAILED: {type(e).__name__}: {e}")
         return self._ads
 

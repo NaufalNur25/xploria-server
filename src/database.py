@@ -40,7 +40,6 @@ def _seed_default_pins_if_empty():
         # Insert satu persatu
         for mapping in default_mappings:
             PinMapping.create(**mapping)
-        print("[xploria_db] Berhasil menyemai (seed) konfigurasi pin default ke dalam SQLite.")
 
 def get_all_pin_mappings():
     db.connect(reuse_if_open=True)

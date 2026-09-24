@@ -2,6 +2,7 @@ import sys
 import time
 import atexit
 import signal
+import logging
 import warnings
 
 warnings.simplefilter('ignore')
@@ -10,7 +11,6 @@ try:
     import lgpio as _gpio
 except ImportError:
     _gpio = None
-    print("[xploria_hal] WARNING: lgpio tidak ditemukan - GPIO fisik tidak akan berfungsi.", file=sys.stderr)
 
 try:
     from database import init_db, get_all_pin_mappings
@@ -23,14 +23,13 @@ except ImportError:
         _PIN_MAP = get_all_pin_mappings()
     except ImportError:
         _PIN_MAP = {}
-        print("[xploria_hal] WARNING: database module tidak ditemukan. _PIN_MAP kosong.", file=sys.stderr)
 
 _chips = {}
 _CLAIMED_PINS = {} # Format: { physical_pin: "module_name" }
 
 def report_collision(gpio, module_name, owner):
     msg = f"Collision Pin Fisik {gpio}. '{module_name}' ditolak (sedang dipakai '{owner}')"
-    print(f"[xploria_hal] WARNING: {msg}", file=sys.stderr)
+    logging.warning(f"[HAL] {msg}")
     try:
         from hal import telemetry
         telemetry.send(error_collision=msg)
@@ -39,16 +38,14 @@ def report_collision(gpio, module_name, owner):
 
 def reload_pin_map():
     global _PIN_MAP, _CLAIMED_PINS
-    _CLAIMED_PINS.clear() # Reset lock when map reloaded
+    _CLAIMED_PINS.clear()
     try:
         from database import get_all_pin_mappings
         _PIN_MAP = get_all_pin_mappings()
-        print(f"[xploria_hal] _PIN_MAP reloaded: {_PIN_MAP}")
     except ImportError:
         try:
             from src.database import get_all_pin_mappings
             _PIN_MAP = get_all_pin_mappings()
-            print(f"[xploria_hal] _PIN_MAP reloaded: {_PIN_MAP}")
         except ImportError:
             pass
 
