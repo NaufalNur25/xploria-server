@@ -376,6 +376,18 @@ class SensorHAL:
         raw = self._read_raw(p, pull=pull_up)
         return 100 if raw == 0 else 0
 
+    def read_rain(self, p=6):
+        """
+        Sensor hujan CN15 (rain detector): active-low, pull-up internal.
+        DO pin LOW  → hujan terdeteksi  → return True
+        DO pin HIGH → permukaan kering  → return False
+        Default GPIO 6 (tidak konflik dengan sensor lain).
+        """
+        _gpio = get_gpio_lib()
+        pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
+        raw = self._read_raw(p, pull=pull_up)
+        return (raw == 0) if raw is not None else False
+
     # ------------------------------------------------------------------
     # DHT22 — non-blocking: hanya baca cache dari background worker
     # ------------------------------------------------------------------
