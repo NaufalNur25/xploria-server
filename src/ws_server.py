@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import websockets
 import traceback
 
-from hal import sensor, motor, led, power, rfid, telemetry, pin, audio, display, motion, lan, ai
+from hal import sensor, motor, led, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai
 from hal.sensor import stop_all_workers
 
 # Wrapper global untuk proxy
@@ -31,6 +31,7 @@ global_proxies = {
     "sensor": HalProxy(sensor),
     "motor": HalProxy(motor),
     "led": HalProxy(led),
+    "ledstrip": HalProxy(ledstrip),
     "power": HalProxy(power),
     "rfid": HalProxy(rfid),
     "telemetry": HalProxy(telemetry),

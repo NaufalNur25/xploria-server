@@ -5,3 +5,4 @@ adafruit-circuitpython-pn532
 adafruit-blinka
 adafruit-circuitpython-dht
 peewee>=3.17.0
+rpi-ws281x
