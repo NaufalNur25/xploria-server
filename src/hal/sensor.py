@@ -291,6 +291,26 @@ def stop_all_workers():
 class SensorHAL:
     def __init__(self):
         self._in_pins = {}   # { pin: pull_mode }
+        self._ads = None
+        self._ads_initialized = False
+
+    def _init_ads(self):
+        if not self._ads_initialized:
+            try:
+                import board
+                import busio
+                import adafruit_ads1x15.ads1115 as ADS
+                from adafruit_ads1x15.analog_in import AnalogIn
+                
+                i2c = busio.I2C(board.SCL, board.SDA)
+                self._ads = ADS.ADS1115(i2c)
+                self._ads_initialized = True
+                logger.info("ADS1115 initialized successfully for Analog Sensors (LDR GL5528)")
+            except Exception as e:
+                self._ads = None
+                self._ads_initialized = True # Mark as tried
+                logger.warning(f"ADS1115 init failed (Analog Sensors disabled): {e}")
+        return self._ads
 
     # ------------------------------------------------------------------
     # Helper: claim input pin (untuk sensor digital sederhana)
@@ -370,11 +390,44 @@ class SensorHAL:
         raw = self._read_raw(p, pull=pull_up)
         return 'BLACK' if raw == 0 else 'WHITE'
 
-    def read_light(self, p=24):
-        _gpio = get_gpio_lib()
-        pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
-        raw = self._read_raw(p, pull=pull_up)
-        return 100 if raw == 0 else 0
+    def read_light(self, p=24, analog=False, adc_channel=0) -> float:
+        """
+        Membaca sensor cahaya (LDR).
+        - Jika analog=False (Default): Membaca Pin Digital (DO) active-low. Mengembalikan 100 atau 0.
+        - Jika analog=True: Membaca LDR GL5528 via I2C ADS1115 (AO). 
+          adc_channel (0-3) menentukan pin A0-A3 pada ADS1115. Mengembalikan persentase 0.0 - 100.0%.
+        """
+        if analog:
+            ads = self._init_ads()
+            if not ads:
+                return 0.0
+                
+            try:
+                from adafruit_ads1x15.analog_in import AnalogIn
+                import adafruit_ads1x15.ads1115 as ADS
+                
+                # Petakan integer ke pin konstan milik library
+                chan_map = {0: ADS.P0, 1: ADS.P1, 2: ADS.P2, 3: ADS.P3}
+                chan = AnalogIn(ads, chan_map.get(adc_channel, ADS.P0))
+                
+                # Hitung persentase berdasarkan tegangan (Asumsi VCC 3.3V)
+                # Raw voltage ADS1115 bergantung pada pencahayaan dan R-Divider (umumnya 10k)
+                # Semakin terang, resistansi LDR GL5528 menurun, V_out berubah.
+                volts = chan.voltage
+                
+                # Normalisasi tegangan (0v - 3.3v) ke persentase (0 - 100)
+                # Jika dirangkai pull-down (GND - 10k - A0 - LDR - VCC), tegangan naik saat terang.
+                intensity = (volts / 3.3) * 100.0
+                return max(0.0, min(100.0, round(intensity, 1)))
+                
+            except Exception as e:
+                logger.error(f"Failed to read LDR via ADS1115 channel {adc_channel}: {e}")
+                return 0.0
+        else:
+            _gpio = get_gpio_lib()
+            pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
+            raw = self._read_raw(p, pull=pull_up)
+            return 100.0 if raw == 0 else 0.0
 
     def read_rain(self, p=6):
         """

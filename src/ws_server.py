@@ -66,7 +66,7 @@ def _gather_telemetry():
         "temperature": sensor.read_temperature(27),
         "humidity": sensor.read_humidity(27),
         "gas": sensor.read_gas(),
-        "light": sensor.read_light(),
+        "light": sensor.read_light(analog=True, adc_channel=0),
         "motion_pir1": sensor.read_motion(17),
         "motion_pir2": sensor.read_motion(4),
         "distance_cm": sensor.read_ultrasonic(23, 24),

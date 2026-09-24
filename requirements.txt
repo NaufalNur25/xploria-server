@@ -6,3 +6,4 @@ adafruit-blinka
 adafruit-circuitpython-dht
 peewee>=3.17.0
 rpi-ws281x
+adafruit-circuitpython-ads1x15
