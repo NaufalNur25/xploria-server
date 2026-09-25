@@ -445,16 +445,44 @@ class SensorHAL:
             return 100.0 if raw == 0 else 0.0
 
     def read_rain(self, p=6):
-        """
-        Sensor hujan CN15 (rain detector): active-low, pull-up internal.
-        DO pin LOW  → hujan terdeteksi  → return True
-        DO pin HIGH → permukaan kering  → return False
-        Default GPIO 6 (tidak konflik dengan sensor lain).
-        """
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
         return (raw == 0) if raw is not None else False
+
+    def read_water_level(self, adc_channel=2) -> float:
+        """
+        Membaca ketinggian air dari sensor Funduino Water Level via I2C ADS1115.
+
+        Prinsip kerja Funduino:
+        - Semakin dalam terendam air, semakin banyak jalur konduktif yang terhubung.
+        - Resistansi turun -> tegangan pada pin S (Signal/AO) naik.
+        - Output: 0.0% (kering/tidak ada air) hingga 100.0% (level air penuh/maksimal).
+
+        Wiring:
+        - Pin S (Signal) -> ADS1115 Axi (default A2)
+        - Pin + (VCC)    -> 3.3V atau 5V (disarankan 3.3V agar kompatibel dengan ADS1115)
+        - Pin - (GND)    -> GND
+
+        Return:
+        - float: persentase ketinggian air (0.0 - 100.0%)
+        """
+        ads = self._init_ads()
+        if not ads:
+            return 0.0
+
+        try:
+            from adafruit_ads1x15.analog_in import AnalogIn
+            chan = AnalogIn(ads, adc_channel)
+            volts = chan.voltage
+
+            # Funduino menghasilkan tegangan 0v (kering) sampai ~3.3v (penuh)
+            level_pct = (volts / 3.3) * 100.0
+            return max(0.0, min(100.0, round(level_pct, 1)))
+
+        except Exception as e:
+            logger.error(f"Water Level read FAILED channel {adc_channel}: {type(e).__name__}: {e}")
+            return 0.0
 
     # ------------------------------------------------------------------
     # DHT22 — non-blocking: hanya baca cache dari background worker
