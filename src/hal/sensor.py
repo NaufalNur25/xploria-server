@@ -462,43 +462,32 @@ class SensorHAL:
         raw = self._read_raw(p, pull=pull_up)
         return (raw == 0) if raw is not None else False
 
-    def read_water_level(self, adc_channel=2) -> float:
+    def read_water_level(self, adc_channel=2) -> str:
         """
         Membaca ketinggian air dari sensor Funduino Water Level via I2C ADS1115.
 
-        Prinsip kerja Funduino:
-        - Semakin dalam terendam air, semakin banyak jalur konduktif yang terhubung.
-        - Resistansi turun -> tegangan pada pin S (Signal/AO) naik.
-
-        Kalibrasi dua titik (diukur langsung dari hardware dengan VCC 3.3V):
-        - V_DRY  (~0.1V) : sensor kering / tidak ada air sama sekali
-        - V_FULL (~1.5V) : sensor terendam penuh
-        Funduino tidak pernah mencapai 3.3V karena resistansi internal jalur
-        konduktifnya, sehingga membagi langsung dengan 3.3 menghasilkan range
-        yang terkompresi (hanya 15-18% meski sudah terendam cukup dalam).
-
-        Sesuaikan V_DRY dan V_FULL berdasarkan hasil pengukuran aktual
-        menggunakan perintah: sensor.read_water_level.raw_voltage (debugging).
-
         Return:
-        - float: persentase ketinggian air (0.0 - 100.0%)
+        - str: Format "{persentase}:{tegangan}V" (contoh: "28.6:0.50V")
+          atau "0.0:0.00V" jika gagal/kering total.
         """
-        # Titik kalibrasi — sesuaikan berdasarkan pengukuran aktual hardware
-        V_DRY  = 0.10   # Voltage saat sensor benar-benar kering (batas noise)
-        V_FULL = 1.50   # Voltage saat sensor terendam penuh
+        V_DRY  = 0.10   # Voltage kering (noise floor)
+        V_FULL = 1.50   # Voltage terendam penuh
 
         self._init_ads()
         volts = self._read_ads_channel(adc_channel, "WaterLevel")
         if volts is None:
-            return 0.0
+            return "0.0:0.00V"
 
-        # Di bawah noise floor = kering
+        # Tampilkan selalu voltase mentah untuk debugging hw
+        raw_v_str = f"{volts:.2f}V"
+
         if volts < V_DRY:
-            return 0.0
+            return f"0.0:{raw_v_str}"
 
-        # Normalisasi linear ke rentang kalibrasi aktual
         level_pct = (volts - V_DRY) / (V_FULL - V_DRY) * 100.0
-        return max(0.0, min(100.0, round(level_pct, 1)))
+        level_pct = max(0.0, min(100.0, round(level_pct, 1)))
+
+        return f"{level_pct}:{raw_v_str}"
 
     # ------------------------------------------------------------------
     # DHT22 — non-blocking: hanya baca cache dari background worker
