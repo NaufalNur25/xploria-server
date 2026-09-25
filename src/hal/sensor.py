@@ -462,32 +462,29 @@ class SensorHAL:
         raw = self._read_raw(p, pull=pull_up)
         return (raw == 0) if raw is not None else False
 
-    def read_water_level(self, adc_channel=2) -> str:
+    def read_water_level(self, adc_channel=2) -> float:
         """
         Membaca ketinggian air dari sensor Funduino Water Level via I2C ADS1115.
 
         Return:
-        - str: Format "{persentase}:{tegangan}V" (contoh: "28.6:0.50V")
-          atau "0.0:0.00V" jika gagal/kering total.
+        - float: persentase ketinggian air (0.0 - 100.0%)
         """
-        V_DRY  = 0.10   # Voltage kering (noise floor)
-        V_FULL = 1.50   # Voltage terendam penuh
+        VOLTAGE_MIN = 0.0
+        VOLTAGE_MAX = 1.70
 
         self._init_ads()
         volts = self._read_ads_channel(adc_channel, "WaterLevel")
         if volts is None:
-            return "0.0:0.00V"
+            return 0.0
 
-        # Tampilkan selalu voltase mentah untuk debugging hw
-        raw_v_str = f"{volts:.2f}V"
+        # Hitung persentase murni tanpa hard-cutoff (sama persis dengan script custom)
+        level = ((volts - VOLTAGE_MIN) / (VOLTAGE_MAX - VOLTAGE_MIN)) * 100.0
+        level = max(0.0, min(100.0, round(level, 1)))
 
-        if volts < V_DRY:
-            return f"0.0:{raw_v_str}"
+        # Cetak log untuk membantu debugging tim HW
+        logger.info(f"WaterLevel ch{adc_channel} -> V: {volts:.3f}V | Lvl: {level}%")
 
-        level_pct = (volts - V_DRY) / (V_FULL - V_DRY) * 100.0
-        level_pct = max(0.0, min(100.0, round(level_pct, 1)))
-
-        return f"{level_pct}:{raw_v_str}"
+        return level
 
     # ------------------------------------------------------------------
     # DHT22 — non-blocking: hanya baca cache dari background worker
