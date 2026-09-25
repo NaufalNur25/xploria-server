@@ -469,28 +469,35 @@ class SensorHAL:
         Prinsip kerja Funduino:
         - Semakin dalam terendam air, semakin banyak jalur konduktif yang terhubung.
         - Resistansi turun -> tegangan pada pin S (Signal/AO) naik.
-        - Output: 0.0% (kering/tidak ada air) hingga 100.0% (level air penuh/maksimal).
 
-        Wiring:
-        - Pin S (Signal) -> ADS1115 Axi (default A2)
-        - Pin + (VCC)    -> 3.3V atau 5V (disarankan 3.3V agar kompatibel dengan ADS1115)
-        - Pin - (GND)    -> GND
+        Kalibrasi dua titik (diukur langsung dari hardware dengan VCC 3.3V):
+        - V_DRY  (~0.1V) : sensor kering / tidak ada air sama sekali
+        - V_FULL (~1.5V) : sensor terendam penuh
+        Funduino tidak pernah mencapai 3.3V karena resistansi internal jalur
+        konduktifnya, sehingga membagi langsung dengan 3.3 menghasilkan range
+        yang terkompresi (hanya 15-18% meski sudah terendam cukup dalam).
+
+        Sesuaikan V_DRY dan V_FULL berdasarkan hasil pengukuran aktual
+        menggunakan perintah: sensor.read_water_level.raw_voltage (debugging).
 
         Return:
         - float: persentase ketinggian air (0.0 - 100.0%)
         """
+        # Titik kalibrasi — sesuaikan berdasarkan pengukuran aktual hardware
+        V_DRY  = 0.10   # Voltage saat sensor benar-benar kering (batas noise)
+        V_FULL = 1.50   # Voltage saat sensor terendam penuh
+
         self._init_ads()
         volts = self._read_ads_channel(adc_channel, "WaterLevel")
         if volts is None:
             return 0.0
 
-        # Threshold minimum 0.1V untuk filter floating/crosstalk dari channel lain
-        # Funduino tidak mungkin menghasilkan tegangan saat benar-benar kering
-        NOISE_FLOOR_V = 0.1
-        if volts < NOISE_FLOOR_V:
+        # Di bawah noise floor = kering
+        if volts < V_DRY:
             return 0.0
 
-        level_pct = (volts / 3.3) * 100.0
+        # Normalisasi linear ke rentang kalibrasi aktual
+        level_pct = (volts - V_DRY) / (V_FULL - V_DRY) * 100.0
         return max(0.0, min(100.0, round(level_pct, 1)))
 
     # ------------------------------------------------------------------
