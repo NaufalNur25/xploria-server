@@ -352,19 +352,48 @@ class SensorHAL:
     # ------------------------------------------------------------------
 
     def read_gas(self, p=5):
-        """MQ Gas sensor: active-low. Default GPIO 5 (tidak konflik dengan PIR GPIO17)."""
         raw = self._read_raw(p, pull=0)
         return (raw == 0) if raw is not None else False
 
+    def read_air_quality_status(self, p=5, analog=True, adc_channel=1):
+        """
+        Membaca sensor kualitas udara MQ-135.
+        - Jika analog=True (Default): Membaca via pin AO -> I2C ADS1115.
+          Mengembalikan persentase polutan 0.0 - 100.0%.
+          Semakin tinggi nilai, semakin buruk kualitas udara.
+        - Jika analog=False: Membaca via pin DO -> GPIO digital active-low.
+          Mengembalikan True (gas terdeteksi / kualitas buruk) atau False (aman).
+        """
+        if analog:
+            ads = self._init_ads()
+            if not ads:
+                return 0.0
+
+            try:
+                from adafruit_ads1x15.analog_in import AnalogIn
+                chan = AnalogIn(ads, adc_channel)
+                volts = chan.voltage
+
+                # MQ-Series: Semakin pekat gas, resistansi turun -> tegangan AO naik.
+                # Normalisasi tegangan (0v - 3.3v) ke persentase polutan (0 - 100%)
+                quality_pct = (volts / 3.3) * 100.0
+                return max(0.0, min(100.0, round(quality_pct, 1)))
+
+            except Exception as e:
+                logger.error(f"Air Quality read FAILED channel {adc_channel}: {type(e).__name__}: {e}")
+                return 0.0
+        else:
+            # Mode Digital (DO): active-low, HIGH = aman, LOW = gas terdeteksi
+            raw = self._read_raw(p, pull=0)
+            return (raw == 0) if raw is not None else False
+
     def read_motion(self, p=27):
-        """PIR sensor: active-high dengan pull-down."""
         _gpio = get_gpio_lib()
         pull_down = getattr(_gpio, 'SET_PULL_DOWN', 1) if _gpio else 1
         raw = self._read_raw(p, pull=pull_down)
         return bool(raw) if raw is not None else False
 
     def read_ir_obstacle(self, p=25):
-        """IR obstacle: active-low. Default GPIO 25 (tidak konflik ultrasonic TRIG GPIO23)."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
         raw = self._read_raw(p, pull=pull_up)
