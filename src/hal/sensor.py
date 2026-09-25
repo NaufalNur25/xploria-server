@@ -284,25 +284,56 @@ def stop_all_workers():
 
 class SensorHAL:
     def __init__(self):
-        self._in_pins = {}   # { pin: pull_mode }
-        self._ads = None
+        self._in_pins = {}
+        self._ads      = None
         self._ads_initialized = False
+        # RLock (reentrant) agar _init_ads dan _read_ads_channel
+        # bisa dipanggil secara nested tanpa deadlock
+        self._ads_lock = threading.RLock()
 
     def _init_ads(self):
-        if not self._ads_initialized:
-            try:
-                import busio
-                import board
-                import adafruit_ads1x15.ads1115 as ADS
+        """Inisialisasi ADS1115. Thread-safe via RLock."""
+        with self._ads_lock:
+            if not self._ads_initialized:
+                try:
+                    import busio
+                    import board
+                    import adafruit_ads1x15.ads1115 as ADS
 
-                i2c = busio.I2C(board.SCL, board.SDA)
-                self._ads = ADS.ADS1115(i2c)
-                self._ads_initialized = True
-            except Exception as e:
+                    i2c = busio.I2C(board.SCL, board.SDA)
+                    self._ads = ADS.ADS1115(i2c)
+                    self._ads_initialized = True
+                except Exception as e:
+                    self._ads = None
+                    self._ads_initialized = False
+                    logger.error(f"ADS1115 init FAILED: {type(e).__name__}: {e}")
+            return self._ads
+
+    def _read_ads_channel(self, adc_channel: int, sensor_name: str):
+        """
+        Helper thread-safe untuk membaca satu channel ADS1115.
+        - Dipanggil setelah _init_ads() berhasil.
+        - Jika OSError (I2C bus collision/noise), reset instance
+          agar auto-reconnect pada panggilan berikutnya.
+        - Return: float voltage, atau None jika gagal.
+        """
+        with self._ads_lock:
+            if not self._ads:
+                return None
+            try:
+                from adafruit_ads1x15.analog_in import AnalogIn
+                chan = AnalogIn(self._ads, adc_channel)
+                volts = chan.voltage
+                return volts
+            except OSError as e:
+                # Reset agar sesi I2C berikutnya bisa reconnect
+                logger.error(f"[ADS1115] {sensor_name} I2C error ch{adc_channel}: {e} — resetting")
                 self._ads = None
                 self._ads_initialized = False
-                logger.error(f"ADS1115 init FAILED: {type(e).__name__}: {e}")
-        return self._ads
+                return None
+            except Exception as e:
+                logger.error(f"[ADS1115] {sensor_name} read FAILED ch{adc_channel}: {type(e).__name__}: {e}")
+                return None
 
     # ------------------------------------------------------------------
     # Helper: claim input pin (untuk sensor digital sederhana)
@@ -365,23 +396,12 @@ class SensorHAL:
           Mengembalikan True (gas terdeteksi / kualitas buruk) atau False (aman).
         """
         if analog:
-            ads = self._init_ads()
-            if not ads:
+            self._init_ads()
+            volts = self._read_ads_channel(adc_channel, "AirQuality")
+            if volts is None:
                 return 0.0
-
-            try:
-                from adafruit_ads1x15.analog_in import AnalogIn
-                chan = AnalogIn(ads, adc_channel)
-                volts = chan.voltage
-
-                # MQ-Series: Semakin pekat gas, resistansi turun -> tegangan AO naik.
-                # Normalisasi tegangan (0v - 3.3v) ke persentase polutan (0 - 100%)
-                quality_pct = (volts / 3.3) * 100.0
-                return max(0.0, min(100.0, round(quality_pct, 1)))
-
-            except Exception as e:
-                logger.error(f"Air Quality read FAILED channel {adc_channel}: {type(e).__name__}: {e}")
-                return 0.0
+            quality_pct = (volts / 3.3) * 100.0
+            return max(0.0, min(100.0, round(quality_pct, 1)))
         else:
             # Mode Digital (DO): active-low, HIGH = aman, LOW = gas terdeteksi
             raw = self._read_raw(p, pull=0)
@@ -419,25 +439,12 @@ class SensorHAL:
         - Jika analog=False: Membaca Pin Digital (DO) active-low. Mengembalikan 100 atau 0.
         """
         if analog:
-            ads = self._init_ads()
-            if not ads:
+            self._init_ads()
+            volts = self._read_ads_channel(adc_channel, "LDR")
+            if volts is None:
                 return 0.0
-
-            try:
-                from adafruit_ads1x15.analog_in import AnalogIn
-
-                # Identik dengan custom script: AnalogIn(ads, integer_channel)
-                chan = AnalogIn(ads, adc_channel)
-                volts = chan.voltage
-
-                # Normalisasi tegangan (0v - 3.3v) ke persentase (0 - 100)
-                # Pull-down 10k: tegangan naik saat terang, turun saat gelap
-                intensity = (volts / 3.3) * 100.0
-                return max(0.0, min(100.0, round(intensity, 1)))
-
-            except Exception as e:
-                logger.error(f"LDR read FAILED channel {adc_channel}: {type(e).__name__}: {e}")
-                return 0.0
+            intensity = (volts / 3.3) * 100.0
+            return max(0.0, min(100.0, round(intensity, 1)))
         else:
             _gpio = get_gpio_lib()
             pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
@@ -467,22 +474,12 @@ class SensorHAL:
         Return:
         - float: persentase ketinggian air (0.0 - 100.0%)
         """
-        ads = self._init_ads()
-        if not ads:
+        self._init_ads()
+        volts = self._read_ads_channel(adc_channel, "WaterLevel")
+        if volts is None:
             return 0.0
-
-        try:
-            from adafruit_ads1x15.analog_in import AnalogIn
-            chan = AnalogIn(ads, adc_channel)
-            volts = chan.voltage
-
-            # Funduino menghasilkan tegangan 0v (kering) sampai ~3.3v (penuh)
-            level_pct = (volts / 3.3) * 100.0
-            return max(0.0, min(100.0, round(level_pct, 1)))
-
-        except Exception as e:
-            logger.error(f"Water Level read FAILED channel {adc_channel}: {type(e).__name__}: {e}")
-            return 0.0
+        level_pct = (volts / 3.3) * 100.0
+        return max(0.0, min(100.0, round(level_pct, 1)))
 
     # ------------------------------------------------------------------
     # DHT22 — non-blocking: hanya baca cache dari background worker
