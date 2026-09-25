@@ -285,23 +285,26 @@ def stop_all_workers():
 class SensorHAL:
     def __init__(self):
         self._in_pins = {}
-        self._ads      = None
+        self._i2c     = None   # Singleton — dibuat sekali, tidak pernah di-recreate
+        self._ads     = None
         self._ads_initialized = False
-        # RLock (reentrant) agar _init_ads dan _read_ads_channel
-        # bisa dipanggil secara nested tanpa deadlock
         self._ads_lock = threading.RLock()
 
+    def _get_i2c(self):
+        """Singleton I2C bus. Dibuat sekali seumur hidup proses."""
+        if self._i2c is None:
+            import busio
+            import board
+            self._i2c = busio.I2C(board.SCL, board.SDA)
+        return self._i2c
+
     def _init_ads(self):
-        """Inisialisasi ADS1115. Thread-safe via RLock."""
+        """Inisialisasi ADS1115 di atas I2C singleton. Thread-safe via RLock."""
         with self._ads_lock:
             if not self._ads_initialized:
                 try:
-                    import busio
-                    import board
                     import adafruit_ads1x15.ads1115 as ADS
-
-                    i2c = busio.I2C(board.SCL, board.SDA)
-                    self._ads = ADS.ADS1115(i2c)
+                    self._ads = ADS.ADS1115(self._get_i2c())
                     self._ads_initialized = True
                 except Exception as e:
                     self._ads = None
@@ -311,10 +314,11 @@ class SensorHAL:
 
     def _read_ads_channel(self, adc_channel: int, sensor_name: str):
         """
-        Helper thread-safe untuk membaca satu channel ADS1115.
-        - Dipanggil setelah _init_ads() berhasil.
-        - Jika OSError (I2C bus collision/noise), reset instance
-          agar auto-reconnect pada panggilan berikutnya.
+        Baca satu channel ADS1115 secara thread-safe.
+        - Jika OSError: hanya reset objek ADS (bukan I2C bus) agar reconnect
+          pada panggilan berikutnya tanpa membocorkan file descriptor.
+        - Jeda 5ms sebelum baca untuk memberi waktu MUX ADS1115 settle
+          setelah pergantian channel (mencegah crosstalk antar channel).
         - Return: float voltage, atau None jika gagal.
         """
         with self._ads_lock:
@@ -323,11 +327,12 @@ class SensorHAL:
             try:
                 from adafruit_ads1x15.analog_in import AnalogIn
                 chan = AnalogIn(self._ads, adc_channel)
+                time.sleep(0.005)  # 5ms MUX settle time antar channel
                 volts = chan.voltage
                 return volts
             except OSError as e:
-                # Reset agar sesi I2C berikutnya bisa reconnect
-                logger.error(f"[ADS1115] {sensor_name} I2C error ch{adc_channel}: {e} — resetting")
+                # Reset ADS saja — I2C singleton tetap hidup
+                logger.error(f"[ADS1115] {sensor_name} I2C error ch{adc_channel}: {e} — resetting ADS")
                 self._ads = None
                 self._ads_initialized = False
                 return None
@@ -478,6 +483,13 @@ class SensorHAL:
         volts = self._read_ads_channel(adc_channel, "WaterLevel")
         if volts is None:
             return 0.0
+
+        # Threshold minimum 0.1V untuk filter floating/crosstalk dari channel lain
+        # Funduino tidak mungkin menghasilkan tegangan saat benar-benar kering
+        NOISE_FLOOR_V = 0.1
+        if volts < NOISE_FLOOR_V:
+            return 0.0
+
         level_pct = (volts / 3.3) * 100.0
         return max(0.0, min(100.0, round(level_pct, 1)))
 

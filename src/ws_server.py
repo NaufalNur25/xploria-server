@@ -63,16 +63,18 @@ def _gather_telemetry():
     house_power = power.read_house_power()
     solar_power = power.read_solar_power()
     return {
-        "temperature": sensor.read_temperature(27),
-        "humidity": sensor.read_humidity(27),
-        "gas": sensor.read_gas(),
-        "light": sensor.read_light(analog=True, adc_channel=0),
-        "motion_pir1": sensor.read_motion(17),
-        "motion_pir2": sensor.read_motion(4),
-        "distance_cm": sensor.read_ultrasonic(23, 24),
-        "house_power": house_power,
-        "solar_power": solar_power,
-        "rfid_uid": rfid.read_uid()
+        "temperature":    sensor.read_temperature(27),
+        "humidity":       sensor.read_humidity(27),
+        "gas":            sensor.read_gas(),
+        "light":          sensor.read_light(analog=True, adc_channel=0),
+        "air_quality":    sensor.read_air_quality_status(analog=True, adc_channel=1),
+        "water_level":    sensor.read_water_level(adc_channel=2),
+        "motion_pir1":    sensor.read_motion(17),
+        "motion_pir2":    sensor.read_motion(4),
+        "distance_cm":    sensor.read_ultrasonic(23, 24),
+        "house_power":    house_power,
+        "solar_power":    solar_power,
+        "rfid_uid":       rfid.read_uid()
     }
 
 
