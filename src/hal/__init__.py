@@ -5,12 +5,14 @@ from .led import LEDHAL
 from .ledstrip import LedStripHAL
 from .rfid import RFIDHAL
 from .telemetry import TelemetryHAL
+from .rgb import RGBHAL
 from .mocks import AudioHAL, DisplayHAL, MotionHAL, LANHAL, AIHAL, PowerHAL
 
 pin       = PinHAL()
 sensor    = SensorHAL()
 motor     = MotorHAL()
 led       = LEDHAL()
+rgb       = RGBHAL()
 ledstrip  = LedStripHAL()
 rfid      = RFIDHAL()
 telemetry = TelemetryHAL()

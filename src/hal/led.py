@@ -16,7 +16,7 @@ class LEDHAL(PinHAL):
         for t in self._resolve_targets(target):
             p = self._led_pins.get(t, t)
             self.set_digital(p, "HIGH" if color != "black" else "LOW")
-            
+
         if secs is not None:
             time.sleep(secs)
             for t in self._resolve_targets(target):
