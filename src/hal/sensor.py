@@ -244,12 +244,18 @@ _ultrasonic_workers_lock = threading.Lock()
 
 
 def _get_dht_worker(pin: int) -> _DHTWorker:
+    try:
+        from .core import _PIN_MAP
+        actual_pin = _PIN_MAP.get(int(pin), int(pin))
+    except Exception:
+        actual_pin = int(pin)
+
     with _dht_workers_lock:
-        if pin not in _dht_workers:
-            w = _DHTWorker(pin)
+        if actual_pin not in _dht_workers:
+            w = _DHTWorker(actual_pin)
             w.start()
-            _dht_workers[pin] = w
-        return _dht_workers[pin]
+            _dht_workers[actual_pin] = w
+        return _dht_workers[actual_pin]
 
 
 def _get_ultrasonic_worker(trig: int, echo: int) -> _UltrasonicWorker:
@@ -388,28 +394,52 @@ class SensorHAL:
     # ------------------------------------------------------------------
 
     def read_gas(self, p=5):
-        raw = self._read_raw(p, pull=0)
+        """Membaca pin digital DO sensor gas (active-low: True jika gas terdeteksi, False jika aman)."""
+        _gpio = get_gpio_lib()
+        pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
+        raw = self._read_raw(p, pull=pull_up)
         return (raw == 0) if raw is not None else False
 
-    def read_air_quality_status(self, p=5, analog=True, adc_channel=1):
+    def read_gas_status(self, p=5, analog=True, adc_channel=0) -> float:
         """
-        Membaca sensor kualitas udara MQ-135.
-        - Jika analog=True (Default): Membaca via pin AO -> I2C ADS1115.
-          Mengembalikan persentase polutan 0.0 - 100.0%.
-          Semakin tinggi nilai, semakin buruk kualitas udara.
+        Membaca kadar gas MQ-9 dalam bentuk persentase (0.0 - 100.0%).
+        Menggunakan ADS1115 A0 (adc_channel=0) dengan rasio voltage divider 10k/20k (1.5x).
+        """
+        return self.read_air_quality_status(p=p, analog=analog, adc_channel=adc_channel)
+
+    def read_air_quality_status(self, p=5, analog=True, adc_channel=0):
+        """
+        Membaca sensor kualitas udara / gas MQ-9 via ADS1115.
+        - Jika analog=True (Default): Membaca via pin AO -> I2C ADS1115 channel 0 (MQ-9 AO).
+          Mengembalikan persentase kadar gas 0.0 - 100.0%.
         - Jika analog=False: Membaca via pin DO -> GPIO digital active-low.
-          Mengembalikan True (gas terdeteksi / kualitas buruk) atau False (aman).
+          Mengembalikan True (gas terdeteksi) atau False (aman).
         """
         if analog:
             self._init_ads()
             volts = self._read_ads_channel(adc_channel, "AirQuality")
+            # Jika channel yang diminta (misal ch 1 dari ws_server) bernilai None/0.0,
+            # dan channel 0 (MQ-9) memiliki tegangan, gunakan channel 0 agar tidak terbaca 0
+            if (volts is None or volts <= 0.02) and adc_channel != 0:
+                volts_ch0 = self._read_ads_channel(0, "AirQuality")
+                if volts_ch0 is not None and volts_ch0 > 0.02:
+                    volts = volts_ch0
+                    adc_channel = 0
+
             if volts is None:
                 return 0.0
-            quality_pct = (volts / 3.3) * 100.0
+
+            # Jika adc_channel 0 (MQ-9 dengan divider 10k/20k), hitung rasio 1.5x terhadap skala 5V
+            divider_ratio = 1.5 if adc_channel == 0 else 1.0
+            v_real = volts * divider_ratio
+            v_max = 5.0 if adc_channel == 0 else 3.3
+            quality_pct = (v_real / v_max) * 100.0
             return max(0.0, min(100.0, round(quality_pct, 1)))
         else:
             # Mode Digital (DO): active-low, HIGH = aman, LOW = gas terdeteksi
-            raw = self._read_raw(p, pull=0)
+            _gpio = get_gpio_lib()
+            pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
+            raw = self._read_raw(p, pull=pull_up)
             return (raw == 0) if raw is not None else False
 
     def read_motion(self, p=27):
