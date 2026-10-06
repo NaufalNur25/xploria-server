@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import websockets
 import traceback
 
-from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai
+from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital
 from hal.sensor import stop_all_workers
 
 # Wrapper global untuk proxy
@@ -41,7 +41,8 @@ global_proxies = {
     "display": HalProxy(display),
     "motion": HalProxy(motion),
     "lan": HalProxy(lan),
-    "ai": HalProxy(ai)
+    "ai": HalProxy(ai),
+    "hospital": HalProxy(hospital)
 }
 
 # Buat modul virtual 'xploria_hal' agar kode Blockly yang menggunakan
