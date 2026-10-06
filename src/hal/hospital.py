@@ -1,5 +1,4 @@
 import logging
-from .telemetry import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +10,7 @@ class HospitalHAL:
         """
         Mengirim instruksi via WebSocket (Telemetry) agar Flutter membuka layar Jitsi.
         """
+        from hal import telemetry
         logger.info(f"Hospital Jitsi: Membuka room '{roomName}' sebagai {role}")
         
         telemetry.send(
@@ -25,6 +25,7 @@ class HospitalHAL:
         """
         Mengirim instruksi via WebSocket agar Flutter menutup layar Jitsi.
         """
+        from hal import telemetry
         logger.info("Hospital Jitsi: Menutup room")
         telemetry.send(
             action="close_jitsi"
