@@ -6,6 +6,7 @@ from .ledstrip import LedStripHAL
 from .rfid import RFIDHAL
 from .telemetry import TelemetryHAL
 from .rgb import RGBHAL
+from .hospital import HospitalHAL
 from .mocks import AudioHAL, DisplayHAL, MotionHAL, LANHAL, AIHAL, PowerHAL
 
 pin       = PinHAL()
@@ -17,6 +18,7 @@ ledstrip  = LedStripHAL()
 rfid      = RFIDHAL()
 telemetry = TelemetryHAL()
 power     = PowerHAL()
+hospital  = HospitalHAL()
 
 audio     = AudioHAL()
 display   = DisplayHAL()
