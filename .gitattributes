@@ -1,0 +1,4 @@
+# Pastikan file yang dieksekusi di Raspberry Pi selalu ber-line-ending LF,
+# meskipun repo di-checkout di Windows.
+*.sh       text eol=lf
+*.service  text eol=lf

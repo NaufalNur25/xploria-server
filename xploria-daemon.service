@@ -1,8 +1,12 @@
 [Unit]
 Description=Xploria Raspberry Pi Daemon
-Documentation=https://github.com/your-org/xploria-rpi-daemon
+Documentation=https://github.com/NaufalNur25/xploria-server
 After=network.target
 Wants=network.target
+
+# Batas restart: maksimal 5x dalam 60 detik sebelum menyerah
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -19,10 +23,6 @@ ExecStart=/home/xploria/xploria-server/.venv/bin/python3 main.py
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=15s
-
-# Batas restart: maksimal 5x dalam 60 detik sebelum menyerah
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # Output ke journald
 StandardOutput=journal

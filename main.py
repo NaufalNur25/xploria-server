@@ -16,11 +16,17 @@ if __name__ == "__main__":
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
+    exit_code = 0
     try:
         asyncio.run(start_server())
     except KeyboardInterrupt:
         logging.info("Daemon Server stopped manually.")
-    except Exception as e:
-        logging.error(f"Server crashed: {e}")
+    except Exception:
+        # Log traceback lengkap dan keluar dengan kode non-zero agar
+        # systemd (Restart=on-failure) me-restart daemon secara otomatis.
+        logging.exception("Server crashed")
+        exit_code = 1
     finally:
         cleanup_gpio()
+
+    sys.exit(exit_code)

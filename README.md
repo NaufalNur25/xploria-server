@@ -59,24 +59,24 @@ Setelah log memunculkan `Starting Xploria Raspberry Pi Daemon on ws://0.0.0.0:90
 
 ## Deploy Production (systemd)
 
-Agar daemon berjalan otomatis saat boot dan restart jika crash:
+Agar daemon berjalan otomatis saat boot dan restart jika crash, gunakan installer:
 
 ```bash
-# Salin service file ke systemd
-sudo cp xploria-daemon.service /etc/systemd/system/
+sudo ./install.sh
+```
 
-# Sesuaikan WorkingDirectory dan ExecStart di file service jika path berbeda
-# sudo nano /etc/systemd/system/xploria-daemon.service
+Installer akan: membuat user `xploria` (+ grup `gpio`, `i2c`, `spi`), menyalin kode ke `/home/xploria/xploria-server`, membuat `.venv`, meng-install dependency, mengatur ownership (agar `pin_config.db` bisa ditulis), lalu memasang & menjalankan `xploria-daemon.service`. Aman dijalankan ulang untuk update kode; `pin_config.db` di target tidak akan ditimpa.
 
-# Aktifkan dan jalankan
-sudo systemctl daemon-reload
-sudo systemctl enable xploria-daemon
-sudo systemctl start xploria-daemon
+Path/user bisa diganti: `sudo APP_USER=xploria APP_DIR=/opt/xploria ./install.sh`
 
+```bash
 # Cek status dan log
 sudo systemctl status xploria-daemon
 sudo journalctl -u xploria-daemon -f
 ```
+
+> **Penting:** Jalankan `pin_config_cli.py` sebagai user service, bukan `sudo` biasa, agar `pin_config.db` tidak berpindah kepemilikan ke root:
+> `sudo -u xploria /home/xploria/xploria-server/.venv/bin/python3 /home/xploria/xploria-server/pin_config_cli.py list`
 
 ## Struktur Project
 ```text
