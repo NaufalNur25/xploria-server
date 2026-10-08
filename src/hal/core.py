@@ -61,7 +61,11 @@ def get_gpio(p):
     module_name = "Unknown"
     try:
         frame = inspect.stack()[1]
-        module_name = frame.function
+        module = inspect.getmodule(frame[0])
+        if module:
+            module_name = module.__name__.split('.')[-1]
+        else:
+            module_name = frame.function
     except:
         pass
         
