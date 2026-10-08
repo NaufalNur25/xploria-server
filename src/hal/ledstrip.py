@@ -81,7 +81,7 @@ class LedStripHAL(PinHAL):
                 f"Gagal inisialisasi WS2812B di GPIO {pin}: {e}"
             ) from e
 
-    def _ensure_strip(self, pin=18, count=30):
+    def _ensure_strip(self, pin=10, count=30):
         """Inisialisasi otomatis saat pertama digunakan."""
         if self._strip is None:
             self.init_strip(pin=pin, count=count)
@@ -135,7 +135,7 @@ class LedStripHAL(PinHAL):
         r=None,
         g=None,
         b=None,
-        pin=18,
+        pin=10,
         count=30,
     ):
         """Mengatur warna seluruh LED pada strip."""
@@ -156,7 +156,7 @@ class LedStripHAL(PinHAL):
         r=None,
         g=None,
         b=None,
-        pin=18,
+        pin=10,
         count=30,
     ):
         """Mengatur satu LED. Index dimulai dari 0."""
