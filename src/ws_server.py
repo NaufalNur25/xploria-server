@@ -54,7 +54,6 @@ for k, v in global_proxies.items():
 sys.modules["xploria_hal"] = _xploria_hal_module
 
 connected_clients = set()
-subscribed_clients = set()
 
 # Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
 _main_loop: asyncio.AbstractEventLoop = None
@@ -258,9 +257,6 @@ async def handler(websocket):
     finally:
         # Gunakan discard agar tidak raise KeyError jika client belum sempat ditambahkan
         connected_clients.discard(websocket)
-        subscribed_clients.discard(websocket)
-        if not subscribed_clients:
-            telemetry.stop_stream()
         logging.info(f"Client disconnected: {client_addr}")
 
 
