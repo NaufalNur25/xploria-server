@@ -574,8 +574,7 @@ class SensorHAL:
         """
         worker = _get_dht_worker(p)
         val = worker.get("humidity")
-        return val if val is not None else 0
-
+        return val if val is not None else 0 
     # ------------------------------------------------------------------
     # HC-SR04 Ultrasonic — non-blocking: hanya baca cache dari worker
     # ------------------------------------------------------------------

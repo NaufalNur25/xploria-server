@@ -31,10 +31,10 @@ def _seed_default_pins_if_empty():
             {'logical_pin': 8,  'physical_pin': 8,  'description': 'Pin 24 | I2C SDA Bus (ADS1115 + PCA9685 + 2x INA226)'},
             {'logical_pin': 9,  'physical_pin': 9,  'description': 'Pin 21 | I2C SCL Bus (ADS1115 + PCA9685 + 2x INA226)'},
             {'logical_pin': 20, 'physical_pin': 20, 'description': 'Pin 38 | RFID PN532 (I2C SDA Pintu Utama)'},
-            {'logical_pin': 21, 'physical_pin': 21, 'description': 'Pin 40 | RFID PN532 (I2C SCL Pintu Utama)'},
+            {'logical_pin': 16, 'physical_pin': 16, 'description': 'Pin 36 | RFID PN532 (I2C SCL Pintu Utama)'},
             {'logical_pin': 18, 'physical_pin': 18, 'description': 'Pin 12 | MAX98357A Audio Amplifier (I2S BCLK)'},
             {'logical_pin': 19, 'physical_pin': 19, 'description': 'Pin 35 | MAX98357A Audio Amplifier (I2S LRCLK)'},
-            {'logical_pin': 5,  'physical_pin': 5,  'description': 'Pin 29 | MAX98357A Audio Amplifier (I2S DIN)'}
+            {'logical_pin': 21,  'physical_pin': 21,  'description': 'Pin 40 | MAX98357A Audio Amplifier (I2S DIN)'}
         ]
         
         # Insert satu persatu
