@@ -89,6 +89,39 @@ class MotorHAL:
         except Exception as e:
             logger.warning(f"Servo 360 error on pin {p}: {e}")
 
+    def set_servo360_map(self, p=18, degree=90, speed=100, sec_per_rev=1.0):
+        """
+        Turunan set_servo360 dengan parameter derajat (human friendly).
+        Servo 360 tidak punya feedback posisi, jadi derajat dikonversi
+        menjadi durasi putar berdasarkan kalibrasi waktu.
+
+        - degree      : Derajat putaran, mis. 15, 45, 90, 180, 360.
+                        Nilai negatif = putar berlawanan arah.
+        - speed       : Kecepatan 1 s/d 100 (%), default 100.
+        - sec_per_rev : Waktu (detik) untuk 1 putaran penuh (360°) pada
+                        speed 100. Kalibrasi sesuai servo yang dipakai.
+        """
+        try:
+            degree = float(degree)
+            speed = abs(int(speed))
+            sec_per_rev = float(sec_per_rev)
+        except (ValueError, TypeError):
+            logger.warning(f"Servo360 map: parameter tidak valid (degree={degree}, speed={speed})")
+            return
+
+        if degree == 0 or speed == 0 or sec_per_rev <= 0:
+            self.stop_servo(p)
+            return
+
+        speed = min(100, speed)
+        direction = 1 if degree > 0 else -1
+
+        # Durasi = (derajat / 360) x waktu 1 putaran, diskalakan terbalik dengan kecepatan
+        duration = (abs(degree) / 360.0) * sec_per_rev * (100.0 / speed)
+
+        logger.info(f"Servo360 map pin {p}: {degree}° @ {speed}% -> {duration:.3f}s")
+        self.set_servo360(p=p, speed=direction * speed, duration=duration)
+
     def stop_servo(self, p=18):
         """Mematikan pulsa PWM servo seketika (diam total & bebas getar)."""
         _gpio = get_gpio_lib()
