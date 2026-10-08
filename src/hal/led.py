@@ -13,17 +13,25 @@ class LEDHAL(PinHAL):
         return [int(target)]
 
     def display_color(self, target, color, secs=None):
+        from . import telemetry
+        state = "HIGH" if color != "black" else "LOW"
+        
         for t in self._resolve_targets(target):
             p = self._led_pins.get(t, t)
-            self.set_digital(p, "HIGH" if color != "black" else "LOW")
+            self.set_digital(p, state)
+            telemetry.send(**{f"led_{p}": state})
 
         if secs is not None:
             time.sleep(secs)
             for t in self._resolve_targets(target):
                 p = self._led_pins.get(t, t)
                 self.set_digital(p, "LOW")
+                telemetry.send(**{f"led_{p}": "LOW"})
 
     def turn_off(self, target):
+        from . import telemetry
         for t in self._resolve_targets(target):
             p = self._led_pins.get(t, t)
             self.set_digital(p, "LOW")
+            telemetry.send(**{f"led_{p}": "LOW"})
+

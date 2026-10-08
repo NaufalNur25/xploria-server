@@ -106,6 +106,11 @@ class _DHTWorker(threading.Thread):
                     self._cache["last_ok"]     = time.time()
                     self._fail_count = 0
                     sleep_s = self.DHT22_MIN_INTERVAL
+                    
+                    from . import telemetry
+                    telemetry.send(
+                        **{f"temperature_{self.pin}": t, f"humidity_{self.pin}": h}
+                    )
                 else:
                     self._fail_count += 1
                     if self._fail_count >= self.MAX_FAILURES:
@@ -220,6 +225,9 @@ class _UltrasonicWorker(threading.Thread):
                     self._cache = dist
                     self._fail_count = 0
                     sleep_s = self.POLL_INTERVAL
+                    
+                    from . import telemetry
+                    telemetry.send(**{f"ultrasonic_{self.trig}_{self.echo}": dist})
                 else:
                     self._fail_count += 1
                     if self._fail_count >= self.MAX_FAILURES:
@@ -347,10 +355,19 @@ class SensorHAL:
                 return None
 
     # ------------------------------------------------------------------
-    # Helper: claim input pin (untuk sensor digital sederhana)
+    # Helper: claim input pin (untuk sensor digital sederhana) dengan Interrupt
     # ------------------------------------------------------------------
+    
+    def _interrupt_callback(self, chip, gpio, level, tick):
+        """Dipanggil otomatis oleh thread background lgpio saat edge detection terjadi."""
+        from . import telemetry
+        # Gunakan pemetaan dictionary lokal agar tahu pin ini sensor apa (opsional),
+        # tapi pendekatan termudah adalah broadcast langsung.
+        # level: 0 (LOW), 1 (HIGH), 2 (NO CHANGE/TIMEOUT)
+        if level in (0, 1):
+            telemetry.send(**{f"gpio_in_{gpio}": level})
 
-    def _claim_in(self, chip, offset, p_name, pull=0):
+    def _claim_in(self, chip, offset, p_name, pull=0, edge=None):
         _gpio = get_gpio_lib()
         if not _gpio:
             return
@@ -366,15 +383,28 @@ class SensorHAL:
         err = None
         for _ in range(10):
             try:
-                _gpio.gpio_claim_input(chip, offset, pull)
+                if edge is not None:
+                    # Claim sebagai alert (interrupt) untuk Edge Detection
+                    _gpio.gpio_claim_alert(chip, offset, edge, pull)
+                    _gpio.callback(chip, offset, edge, self._interrupt_callback)
+                else:
+                    _gpio.gpio_claim_input(chip, offset, pull)
+                
                 self._in_pins[p_name] = pull
+                
+                # Inisialisasi state pertama kali
+                if edge is not None:
+                    val = _gpio.gpio_read(chip, offset)
+                    from . import telemetry
+                    telemetry.send(**{f"gpio_in_{offset}": val})
+
                 return
             except Exception as e:
                 err = e
                 time.sleep(0.2)
         logger.warning(f"Failed to claim input pin {p_name} pull={pull}: {err}")
 
-    def _read_raw(self, p, pull=0):
+    def _read_raw(self, p, pull=0, edge=None):
         _gpio = get_gpio_lib()
         if not _gpio:
             return None
@@ -383,21 +413,22 @@ class SensorHAL:
         if not chip:
             return None
 
-        self._claim_in(chip, offset, p, pull)
+        self._claim_in(chip, offset, p, pull, edge=edge)
         try:
             return _gpio.gpio_read(chip, offset)
         except Exception:
             return None
 
     # ------------------------------------------------------------------
-    # Sensor digital sederhana (non-blocking, GPIO read instan)
+    # Sensor digital sederhana (Interrupt-driven jika didukung)
     # ------------------------------------------------------------------
 
     def read_gas(self, p=5):
         """Membaca pin digital DO sensor gas (active-low: True jika gas terdeteksi, False jika aman)."""
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
-        raw = self._read_raw(p, pull=pull_up)
+        edge = getattr(_gpio, 'BOTH_EDGES', 3) if _gpio else 3
+        raw = self._read_raw(p, pull=pull_up, edge=edge)
         return (raw == 0) if raw is not None else False
 
     def read_gas_status(self, p=5, analog=True, adc_channel=0) -> float:
@@ -408,18 +439,9 @@ class SensorHAL:
         return self.read_air_quality_status(p=p, analog=analog, adc_channel=adc_channel)
 
     def read_air_quality_status(self, p=5, analog=True, adc_channel=0):
-        """
-        Membaca sensor kualitas udara / gas MQ-9 via ADS1115.
-        - Jika analog=True (Default): Membaca via pin AO -> I2C ADS1115 channel 0 (MQ-9 AO).
-          Mengembalikan persentase kadar gas 0.0 - 100.0%.
-        - Jika analog=False: Membaca via pin DO -> GPIO digital active-low.
-          Mengembalikan True (gas terdeteksi) atau False (aman).
-        """
         if analog:
             self._init_ads()
             volts = self._read_ads_channel(adc_channel, "AirQuality")
-            # Jika channel yang diminta (misal ch 1 dari ws_server) bernilai None/0.0,
-            # dan channel 0 (MQ-9) memiliki tegangan, gunakan channel 0 agar tidak terbaca 0
             if (volts is None or volts <= 0.02) and adc_channel != 0:
                 volts_ch0 = self._read_ads_channel(0, "AirQuality")
                 if volts_ch0 is not None and volts_ch0 > 0.02:
@@ -429,41 +451,48 @@ class SensorHAL:
             if volts is None:
                 return 0.0
 
-            # Jika adc_channel 0 (MQ-9 dengan divider 10k/20k), hitung rasio 1.5x terhadap skala 5V
             divider_ratio = 1.5 if adc_channel == 0 else 1.0
             v_real = volts * divider_ratio
             v_max = 5.0 if adc_channel == 0 else 3.3
             quality_pct = (v_real / v_max) * 100.0
-            return max(0.0, min(100.0, round(quality_pct, 1)))
+            val = max(0.0, min(100.0, round(quality_pct, 1)))
+            
+            from . import telemetry
+            telemetry.send(air_quality=val)
+            return val
         else:
-            # Mode Digital (DO): active-low, HIGH = aman, LOW = gas terdeteksi
             _gpio = get_gpio_lib()
             pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
-            raw = self._read_raw(p, pull=pull_up)
+            edge = getattr(_gpio, 'BOTH_EDGES', 3) if _gpio else 3
+            raw = self._read_raw(p, pull=pull_up, edge=edge)
             return (raw == 0) if raw is not None else False
 
     def read_motion(self, p=27):
         _gpio = get_gpio_lib()
         pull_down = getattr(_gpio, 'SET_PULL_DOWN', 1) if _gpio else 1
-        raw = self._read_raw(p, pull=pull_down)
+        edge = getattr(_gpio, 'BOTH_EDGES', 3) if _gpio else 3
+        raw = self._read_raw(p, pull=pull_down, edge=edge)
         return bool(raw) if raw is not None else False
 
     def read_ir_obstacle(self, p=25):
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
-        raw = self._read_raw(p, pull=pull_up)
+        edge = getattr(_gpio, 'BOTH_EDGES', 3) if _gpio else 3
+        raw = self._read_raw(p, pull=pull_up, edge=edge)
         return (raw == 0) if raw is not None else False
 
     def read_soil_moisture(self, p=26):
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
-        raw = self._read_raw(p, pull=pull_up)
+        edge = getattr(_gpio, 'BOTH_EDGES', 3) if _gpio else 3
+        raw = self._read_raw(p, pull=pull_up, edge=edge)
         return (raw == 0) if raw is not None else False
 
     def read_line(self, p=25):
         _gpio = get_gpio_lib()
         pull_up = getattr(_gpio, 'SET_PULL_UP', 2) if _gpio else 2
-        raw = self._read_raw(p, pull=pull_up)
+        edge = getattr(_gpio, 'BOTH_EDGES', 3) if _gpio else 3
+        raw = self._read_raw(p, pull=pull_up, edge=edge)
         return 'BLACK' if raw == 0 else 'WHITE'
 
     def read_light(self, p=24, analog=True, adc_channel=0) -> float:

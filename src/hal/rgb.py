@@ -52,6 +52,9 @@ class RGBHAL(PinHAL):
             self.set_digital(pins["b"], "HIGH" if b_val else "LOW")
         
         logger.info(f"RGB LED [{target_int}] set to '{color}' (Common Anode: {self.common_anode})")
+        
+        from . import telemetry
+        telemetry.send(**{f"rgb_{target_int}": color})
 
         if secs is not None:
             time.sleep(secs)

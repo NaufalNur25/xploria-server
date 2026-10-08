@@ -39,6 +39,8 @@ class MotorHAL:
         try:
             _gpio.tx_servo(chip, offset, pulse_us, 50, 500, 2500)
             self._servo_pins[p] = True
+            from . import telemetry
+            telemetry.send(**{f"servo_{p}": degree})
         except Exception as e:
             logger.warning(f"Servo error on pin {p}: {e}")
 
@@ -75,6 +77,9 @@ class MotorHAL:
         try:
             _gpio.tx_servo(chip, offset, pulse_us, 50, 500, 2500)
             self._servo_pins[p] = True
+            
+            from . import telemetry
+            telemetry.send(**{f"servo360_{p}": speed})
 
             # Jika ada batas durasi waktu berputar:
             if duration and duration > 0:
@@ -100,6 +105,10 @@ class MotorHAL:
                 _gpio.tx_pwm(chip, offset, 0, 0)
             except Exception:
                 pass
+                
+        from . import telemetry
+        # Set both standard and 360 to stopped since we don't know which it is here
+        telemetry.send(**{f"servo_{p}": 0, f"servo360_{p}": 0})
 
     # =========================================================================
     # KONTROL MOTOR DC & KIPAS (Driver L298N / MOSFET)
@@ -137,6 +146,9 @@ class MotorHAL:
                 _gpio.gpio_write(c1, o1, 0)
                 _gpio.gpio_write(c2, o2, 0)
                 _gpio.tx_pwm(ce, oe, 100, 0)
+                
+            from . import telemetry
+            telemetry.send(**{f"dc_{motor}": speed})
         except Exception as e:
             logger.error(f"Motor {motor} run error: {e}")
 

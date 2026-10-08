@@ -60,66 +60,33 @@ subscribed_clients = set()
 _main_loop: asyncio.AbstractEventLoop = None
 
 
-def _gather_telemetry():
-    """Kumpulkan semua data sensor secara sinkron. Dipanggil di thread pool."""
-    house_power = power.read_house_power()
-    solar_power = power.read_solar_power()
-    return {
-        "temperature":    sensor.read_temperature(27),
-        "humidity":       sensor.read_humidity(27),
-        "gas":            sensor.read_gas(),
-        "light":          sensor.read_light(analog=True, adc_channel=0),
-        "air_quality":    sensor.read_air_quality_status(analog=True, adc_channel=1),
-        "water_level":    sensor.read_water_level(adc_channel=2),
-        "motion_pir1":    sensor.read_motion(17),
-        "motion_pir2":    sensor.read_motion(4),
-        "distance_cm":    sensor.read_ultrasonic(23, 24),
-        "house_power":    house_power,
-        "solar_power":    solar_power,
-        "rfid_uid":       rfid.read_uid()
-    }
-
-
-async def push_telemetry_loop(interval=2.0):
-    """Loop for periodically pushing real sensor data to subscribed clients.
-    
-    Semua sensor reads bersifat non-blocking karena DHT22 dan ultrasonic
-    sudah berjalan di background worker threads masing-masing. Push loop
-    ini hanya membaca nilai cache dan mengirim ke klien — tidak ada blocking
-    GPIO I/O di sini sehingga event loop WebSocket tidak pernah tertunda.
-    """
-    while True:
-        if subscribed_clients and getattr(telemetry, '_running', False):
-            try:
-                # Semua panggilan di bawah non-blocking (baca cache dari worker thread)
-                telemetry_data = _gather_telemetry()
-
-                payload = {
-                    "type": "telemetry",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "telemetry": telemetry_data
-                }
-
-                msg = json.dumps(payload)
-                websockets.broadcast(subscribed_clients, msg)
-
-            except Exception as e:
-                logging.error(f"Error gathering/sending telemetry: {e}")
-
-        await asyncio.sleep(interval)
-
 async def adhoc_telemetry_loop():
-    """Kirim pesan ad-hoc dari Blockly (telemetry.send()) ke semua klien."""
+    """Kirim pesan ad-hoc (delta) dari Blockly (telemetry.send()) ke semua klien.
+    Jika antrean kosong selama 10 detik, kirim heartbeat agar koneksi WebSocket tetap hidup.
+    """
     telemetry._ensure_queue()
     if not getattr(telemetry, '_queue', None):
-        logging.warning("adhoc_telemetry_loop: queue not available, ad-hoc telemetry disabled")
+        logging.warning("adhoc_telemetry_loop: queue not available, telemetry disabled")
         return
 
     while True:
-        msg = await telemetry._queue.get()
-        if connected_clients:
-            websockets.broadcast(connected_clients, msg)
-        telemetry._queue.task_done()
+        try:
+            # Tunggu data masuk antrean dengan timeout 10 detik
+            msg = await asyncio.wait_for(telemetry._queue.get(), timeout=10.0)
+            if connected_clients:
+                websockets.broadcast(connected_clients, msg)
+            telemetry._queue.task_done()
+        except asyncio.TimeoutError:
+            # Tidak ada data telemetry selama 10 detik, kirim heartbeat
+            if connected_clients:
+                heartbeat_msg = json.dumps({
+                    "type": "telemetry_heartbeat",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                websockets.broadcast(connected_clients, heartbeat_msg)
+        except Exception as e:
+            logging.error(f"Error in adhoc_telemetry_loop: {e}")
+            await asyncio.sleep(1)
 
 class StopExecution(Exception):
     pass
@@ -237,17 +204,11 @@ async def handler(websocket):
                     continue
 
                 if cmd == "subscribe_telemetry" or msg_type == "subscribe_telemetry":
-                    subscribed_clients.add(websocket)
-                    telemetry.start_stream()
-                    response = {"type": "ack", "command": "subscribe_telemetry", "status": "ok", "message": "Telemetry subscribed"}
+                    response = {"type": "ack", "command": "subscribe_telemetry", "status": "ok", "message": "Deprecated: Server runs in Pure HAL mode."}
                     await websocket.send(json.dumps(response))
                     continue
                 elif cmd == "unsubscribe_telemetry" or msg_type == "unsubscribe_telemetry":
-                    subscribed_clients.discard(websocket)
-                    # Hentikan polling sensor jika tidak ada subscriber
-                    if not subscribed_clients:
-                        telemetry.stop_stream()
-                    response = {"type": "ack", "command": "unsubscribe_telemetry", "status": "ok"}
+                    response = {"type": "ack", "command": "unsubscribe_telemetry", "status": "ok", "message": "Deprecated: Server runs in Pure HAL mode."}
                     await websocket.send(json.dumps(response))
                     continue
 
@@ -314,15 +275,13 @@ async def start_server(host="0.0.0.0", port=9002):
     # Buat server dulu, lalu jalankan background tasks di dalam context server
     async with websockets.serve(handler, host, port, max_size=1_048_576):
         logging.info(f"server listening on {host}:{port}")
-        telemetry_task = asyncio.create_task(push_telemetry_loop())
         adhoc_task = asyncio.create_task(adhoc_telemetry_loop())
         try:
             await asyncio.Future()  # Run forever
         finally:
-            telemetry_task.cancel()
             adhoc_task.cancel()
             try:
-                await asyncio.gather(telemetry_task, adhoc_task, return_exceptions=True)
+                await asyncio.gather(adhoc_task, return_exceptions=True)
             except Exception:
                 pass
             stop_all_workers()
