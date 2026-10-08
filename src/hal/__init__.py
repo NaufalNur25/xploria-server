@@ -7,7 +7,8 @@ from .rfid import RFIDHAL
 from .telemetry import TelemetryHAL
 from .rgb import RGBHAL
 from .hospital import HospitalHAL
-from .mocks import AudioHAL, DisplayHAL, MotionHAL, LANHAL, AIHAL, PowerHAL
+from .mocks import DisplayHAL, MotionHAL, LANHAL, AIHAL, PowerHAL
+from .audio import AudioHAL
 
 pin       = PinHAL()
 sensor    = SensorHAL()
