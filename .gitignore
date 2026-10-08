@@ -46,3 +46,6 @@ venv.bak/
 # Project specific
 pin_config.db
 *.log
+
+# Local integration-test dependencies
+.test-deps/

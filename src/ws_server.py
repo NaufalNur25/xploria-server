@@ -6,6 +6,9 @@ import types
 from datetime import datetime, timezone
 import websockets
 import traceback
+import threading
+
+from hal.hospital_widgets import HospitalWidgetSession
 
 from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital
 from hal.sensor import stop_all_workers
@@ -90,14 +93,17 @@ async def adhoc_telemetry_loop():
 class StopExecution(Exception):
     pass
 
-def execute_python_code(code_str, client_ws, loop):
+def reject_json_constant(value):
+    raise ValueError("Angka JSON tidak valid: " + value)
+
+
+def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_session=None):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
     
-    # Flag to signal stopping — per-execution closure, tidak dishare
-    setattr(client_ws, 'stop_requested', False)
+    stop_event = stop_event or threading.Event()
 
     def check_stop():
-        if getattr(client_ws, 'stop_requested', False):
+        if stop_event.is_set():
             raise StopExecution("Execution stopped by user")
 
     def custom_print(*args, **kwargs):
@@ -116,17 +122,11 @@ def execute_python_code(code_str, client_ws, loop):
         _time.sleep(0.05)
 
     import time
-    original_sleep = time.sleep
 
     def custom_sleep(secs):
         check_stop()
-        if secs > 0.1:
-            end_time = time.time() + secs
-            while time.time() < end_time:
-                check_stop()
-                original_sleep(0.1)
-        else:
-            original_sleep(secs)
+        if stop_event.wait(max(0, secs)):
+            check_stop()
         check_stop()
 
     # Buat modul virtual time kustom agar sleep bisa di-intercept
@@ -159,45 +159,124 @@ def execute_python_code(code_str, client_ws, loop):
         "adafruit_dht": adafruit_dht,
     }
 
+    if widget_session is not None:
+        widget_session._sleep = custom_sleep
+        exec_globals["hospital"] = HalProxy(widget_session, check_stop)
+
     try:
+        check_stop()
         exec(code_str, exec_globals)
+        if widget_session is not None and (widget_session.handlers or widget_session.forms):
+            widget_session.run()
+        check_stop()
         return {"type": "output", "payload": "\n[Proses Selesai]"}
     except StopExecution:
         return {"type": "output", "payload": "\n[Proses Dihentikan]"}
-    except Exception:
+    except Exception as error:
+        if widget_session is not None and widget_session.active:
+            widget_session.emit("error", message=str(error))
         return {"type": "error", "payload": traceback.format_exc()}
+    finally:
+        if widget_session is not None:
+            widget_session.close()
 
 
 async def handler(websocket):
     client_addr = websocket.remote_address
     logging.info(f"Client connected: {client_addr}")
     connected_clients.add(websocket)
+    execution = None
+    executions = set()
+    tasks = set()
+
+    def stop_execution(target):
+        if target is not None:
+            target["stop"].set()
+            if target["runtime"] is not None:
+                target["runtime"].stop()
+
+    def current_runtime(data):
+        runtime = execution["runtime"] if execution else None
+        if runtime is None or not runtime.active or data.get("project_id") != runtime.project_id or data.get("session_id") != runtime.session_id:
+            raise ValueError("Proyek atau sesi program tidak aktif pada koneksi ini.")
+        return runtime
+
+    async def run_in_background(code, target):
+        try:
+            response = await asyncio.to_thread(execute_python_code, code, websocket, asyncio.get_running_loop(), target["stop"], target["runtime"])
+            await websocket.send(json.dumps(response))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        finally:
+            executions.discard(target["stop"])
+
 
     try:
         async for message in websocket:
+            data = None
             try:
-                data = json.loads(message)
+                data = json.loads(message, parse_constant=reject_json_constant)
+
+                if not isinstance(data, dict):
+                    raise ValueError("Pesan harus berupa objek JSON.")
+                if data.get("type") == "capabilities":
+                    await websocket.send(json.dumps({"type": "capabilities", "request_id": data.get("request_id"), "hospital_widgets": 1}))
+                    continue
 
                 if data.get("type") == "run":
                     code = data.get("code", "")
-                    loop = asyncio.get_running_loop()
+                    if not isinstance(code, str):
+                        raise ValueError("Program harus berupa string Python.")
+                    metadata = data.get("widget_session")
+                    runtime = None
+                    if metadata is not None:
+                        if not isinstance(metadata, dict) or metadata.get("protocol_version") != 1:
+                            raise ValueError("Versi protokol Hospital tidak didukung.")
+                        for key in ("project_id", "session_id"):
+                            if not isinstance(metadata.get(key), str) or not metadata[key]:
+                                raise ValueError(key + " diperlukan.")
+                        sources = metadata.get("sources")
+                        snapshot = metadata.get("snapshot", {})
+                        version = metadata.get("snapshot_version", 0)
+                        if not isinstance(sources, list) or any(not isinstance(uid, str) or not uid for uid in sources) or not isinstance(snapshot, dict) or isinstance(version, bool) or not isinstance(version, int) or version < 0:
+                            raise ValueError("Metadata program tidak valid.")
+                        loop = asyncio.get_running_loop()
+                        def send_widget(**packet):
+                            payload = json.dumps({"type": "telemetry", "telemetry": packet}, ensure_ascii=False, allow_nan=False)
+                            asyncio.run_coroutine_threadsafe(websocket.send(payload), loop)
+                        runtime = HospitalWidgetSession(metadata["project_id"], metadata["session_id"], snapshot, send_widget, lambda _: None, sources, hospital)
+                        runtime.data_version = version
+                    stop_execution(execution)
+                    execution = {"stop": threading.Event(), "runtime": runtime}
+                    executions.add(execution["stop"])
+                    task = asyncio.create_task(run_in_background(code, execution))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    continue
 
-                    async def run_in_background():
-                        setattr(websocket, 'stop_requested', False)
-                        response = await asyncio.to_thread(execute_python_code, code, websocket, loop)
-                        try:
-                            await websocket.send(json.dumps(response))
-                        except Exception:
-                            pass
+                if data.get("type") == "hospital_widget_event":
+                    runtime = current_runtime(data)
+                    status = runtime.accept_event(data)
+                    await websocket.send(json.dumps({"type": "telemetry", "telemetry": {
+                        "action": "hospital_widget", "kind": "event_ack", "project_id": runtime.project_id,
+                        "session_id": runtime.session_id, "block_uid": data.get("source_uid"),
+                        "event_id": data.get("event_id"), "status": status}}))
+                    continue
 
-                    asyncio.create_task(run_in_background())
+                if data.get("type") == "hospital_widget_result":
+                    runtime = current_runtime(data)
+                    if not isinstance(data.get("result"), dict):
+                        raise ValueError("Hasil penyimpanan harus berupa objek.")
+                    runtime.accept_result(data.get("request_id"), data["result"])
                     continue
 
                 cmd = data.get("command")
                 msg_type = data.get("type")
 
                 if msg_type == "stop" or cmd == "stop":
-                    setattr(websocket, 'stop_requested', True)
+                    if "session_id" in data or "project_id" in data:
+                        current_runtime(data)
+                    stop_execution(execution)
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
@@ -251,11 +330,21 @@ async def handler(websocket):
                 pass
             except Exception as e:
                 logging.error(f"Error handling message: {e}")
+                if isinstance(data, dict) and data.get("type") == "hospital_widget_event":
+                    packet = {"action": "hospital_widget", "kind": "event_ack", "status": "rejected",
+                              "project_id": data.get("project_id"), "session_id": data.get("session_id"),
+                              "block_uid": data.get("source_uid"), "event_id": data.get("event_id"), "message": str(e)}
+                    await websocket.send(json.dumps({"type": "telemetry", "telemetry": packet}))
+                else:
+                    await websocket.send(json.dumps({"type": "error", "payload": str(e)}))
 
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         # Gunakan discard agar tidak raise KeyError jika client belum sempat ditambahkan
+        stop_execution(execution)
+        for stop_event in executions:
+            stop_event.set()
         connected_clients.discard(websocket)
         logging.info(f"Client disconnected: {client_addr}")
 
