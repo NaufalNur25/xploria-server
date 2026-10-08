@@ -64,7 +64,9 @@ class _DHTWorker(threading.Thread):
                 import board
                 pin_name = f"D{self.pin}"
                 if hasattr(board, pin_name):
-                    self._dht_device = adafruit_dht.DHT22(getattr(board, pin_name))
+                    # use_pulseio=False sangat penting di Linux modern agar terhindar dari
+                    # isu freeze dan error saat membaca pin DHT secara terus-menerus
+                    self._dht_device = adafruit_dht.DHT22(getattr(board, pin_name), use_pulseio=False)
                 else:
                     logger.error(f"Board does not have pin {pin_name}")
             except Exception as e:
@@ -89,6 +91,11 @@ class _DHTWorker(threading.Thread):
             return None, None
         except Exception as e:
             logger.warning(f"DHT22 pin {self.pin} unexpected error: {e}")
+            try:
+                self._dht_device.exit()
+            except Exception:
+                pass
+            self._dht_device = None
             return None, None
 
     # ------------------------------------------------------------------
