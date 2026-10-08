@@ -165,7 +165,7 @@ class HospitalWidgetSession:
             self.DATA_IOTLAB = event.get("snapshot", self.DATA_IOTLAB)
             self.data_version = version
         self.context = copy.deepcopy(event)
-        self.context.update(stock_success=False, last_patient=None)
+        self.context.update(stock_success=False, last_patient=None, last_delivery=None)
         try:
             handler()
         finally:
@@ -257,11 +257,66 @@ class HospitalWidgetSession:
         self.input("barcode")
         self.context["mode"] = mode  # Compatibility for a saved legacy block.
 
-    def record_medicine_stock(self, qty=None):
-        result = self.command("record_stock", barcode=self.input("barcode"), mode=self.get_scan_mode(),
-                              qty=self.input("jumlah") if qty is None else qty)
+    def record_medicine_stock(self, qty=None, task=None):
+        arguments = dict(barcode=self.input("barcode"), mode=self.get_scan_mode(),
+                         qty=self.input("jumlah") if qty is None else qty)
+        if task is not None:
+            arguments["task"] = task
+        result = self.command("record_stock", **arguments)
         self.context["stock_success"] = result.get("ok", False)
         return self.context["stock_success"]
+
+    def create_delivery(self, patient, barcode, qty=1, room="Ruang Pemeriksaan"):
+        result = self.command("create_delivery", patient=patient, barcode=barcode, qty=qty, room=room)
+        if self.context is not None:
+            self.context["last_delivery"] = result["value"]
+        return result["value"]
+
+    def get_last_delivery(self):
+        if not self.context or self.context.get("last_delivery") is None:
+            raise ValueError("Belum ada tugas pengiriman dalam kejadian ini.")
+        return self.context["last_delivery"]
+
+    def _find_delivery(self, task):
+        if task is None:
+            if self.context and self.context.get("last_delivery"):
+                task = self.context["last_delivery"]
+            else:
+                return None
+        target_id = task.get("id") if isinstance(task, dict) else str(task)
+        for row in self.DATA_IOTLAB.get("pengiriman", []):
+            if str(row.get("id")) == target_id:
+                return row
+        return None
+
+    def dispatch_delivery(self, task=None):
+        if task is None and self.context and self.context.get("last_delivery"):
+            task = self.context["last_delivery"]
+        return self.command("delivery_status", task=task, status="mengirim")["value"]
+
+    def confirm_delivery_arrival(self, task=None):
+        if task is None and self.context and self.context.get("last_delivery"):
+            task = self.context["last_delivery"]
+        return self.command("delivery_status", task=task, status="tiba")["value"]
+
+    def confirm_delivery_handover(self, task=None):
+        if task is None and self.context and self.context.get("last_delivery"):
+            task = self.context["last_delivery"]
+        return self.command("delivery_status", task=task, status="diserahkan")["value"]
+
+    def get_delivery_status(self, task=None):
+        row = self._find_delivery(task)
+        if row is None:
+            return ""
+        return row.get("status", "")
+
+    def deliveries(self, room=None, status=None):
+        rows = self.DATA_IOTLAB.get("pengiriman", [])
+        if room is not None:
+            rows = [r for r in rows if r.get("tujuan") == room]
+        if status is not None:
+            rows = [r for r in rows if r.get("status") == status]
+        return sorted(rows, key=lambda r: (r.get("waktu_dibuat", ""), str(r.get("id", ""))))
 
     def is_stock_record_success(self):
         return bool(self.context and self.context.get("stock_success"))
