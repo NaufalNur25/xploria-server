@@ -98,3 +98,76 @@ xploria-rpi-daemon/
         ├── telemetry.py  # Modul Telemetry
         └── mocks.py      # Perangkat palsu untuk kompatibilitas Blockly
 ```
+
+
+## Formulir Blockly pada IoT Lab
+
+Server menyediakan `hospital` khusus setiap program Hospital. Siswa menentukan
+pertanyaan melalui kategori Blockly yang sudah tersedia; aplikasi menampilkan
+formulir pada widget canvas yang ditambahkan siswa, bukan dialog otomatis.
+Contoh API Python yang digunakan generator:
+
+```python
+hospital.form("form-uid", "Pendaftaran", [
+    {"label": "Nama pasien", "type": "text"},
+    {"label": "Usia", "type": "number"},
+    {"label": "Keluhan", "type": "choice", "options": ["Demam", "Batuk"]},
+])
+
+def submitted():
+    # Jawaban hanya tersedia di dalam kejadian formulir terkait.
+    hospital.report("output-uid", "display", hospital.answer("Nama pasien"))
+    # Pendaftaran memerlukan aksi eksplisit dari blok siswa:
+    # hospital.register_patient(hospital.answer("Nama pasien"),
+    #                           hospital.answer("Keluhan"), "UGD")
+
+hospital.on_form("handler-uid", "Pendaftaran", submitted)
+```
+
+`src/hal/hospital_widgets.py` merupakan runtime bawaan; aplikasi tidak mengirim
+salinan runtime. API scanner, tombol, keluaran, dan tindakan Hospital tetap
+tersedia. API Jitsi didelegasikan ke `HospitalHAL` yang sudah ada.
+
+### Protokol WebSocket versi 1
+
+- `{"type":"capabilities","request_id":"..."}` dibalas dengan
+  `{"type":"capabilities","request_id":"...","hospital_widgets":1}`.
+- `run` menerima `code` dan `widget_session` berisi `protocol_version: 1`,
+  `project_id`, `session_id`, `sources` (UID blok aktif), `snapshot`, dan
+  `snapshot_version`. `run` tanpa metadata tetap mendukung program kit lain.
+- `hospital_widget_event` membawa `project_id`, `session_id`, `source_uid`,
+  `event_id`, `topic` (`form`/`scan`/`button`), dan input. Form memakai `answers`;
+  scan memakai `barcode`, `mode`, `jumlah`. Snapshot dan versi dapat ikut dikirim.
+- `hospital_widget_result` membawa proyek/sesi, `request_id`, dan `result`
+  (`ok`, nilai/error, snapshot serta versinya). Hasil hanya diterima untuk
+  permintaan penyimpanan yang masih menunggu pada sesi pemiliknya.
+- `stop` dapat membawa proyek/sesi. Stop tanpa identitas tetap didukung.
+- Server mengirim paket lengkap `{"type":"telemetry","telemetry":{...}}`
+  dengan `action: hospital_widget`, `project_id`, `session_id`, `kind`, serta UID
+  terkait. Jenisnya meliputi `form`, `binding`, `ready`, `event_ack`, `command`,
+  `value`, `error`, dan `closed`.
+
+Paket widget dikirim hanya ke koneksi pemilik sesi dan tidak melewati broadcast
+atau penyaringan delta telemetry. ACK event (`accepted`, `duplicate`, `rejected`)
+menyatakan penerimaan input; ACK penyimpanan terpisah. Jawaban tidak otomatis
+membuat pasien, obat, atau antrean. Penyimpanan tetap dilakukan aplikasi setelah
+aksi siswa, lalu dikonfirmasi sebelum Python melanjutkan pembacaan hasil.
+
+Nama formulir unik dalam sesi dan label pertanyaan unik dalam formulir. Semua
+pertanyaan wajib diisi; angka harus finite dan jawaban pilihan harus tersedia.
+Stop, disconnect, atau penggantian program menutup sesi lama. Event lama dan
+pengiriman ulang tidak menjalankan handler kedua kali.
+
+Perbarui kode server sebelum menguji aplikasi versi ini, lalu restart daemon
+melalui alur update yang digunakan. Tidak diperlukan dependensi Python baru
+atau migrasi database; `pin_config.db` dan data aplikasi tetap dipertahankan.
+
+### Pengujian tanpa perangkat GPIO
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Tes mengganti objek hardware dengan mock, tetapi memakai modul Hospital dan
+handler WebSocket asli melalui koneksi lokal. Pengujian fisik dilakukan pada Pi
+setelah pembaruan server.

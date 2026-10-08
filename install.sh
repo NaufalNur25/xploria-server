@@ -63,7 +63,7 @@ if [[ "$SRC_DIR" != "$(readlink -f "$APP_DIR")" ]]; then
     # pin_config.db sengaja di-exclude agar konfigurasi pin di target tidak tertimpa.
     rsync -a --delete \
         --exclude '.git/' --exclude '.venv/' --exclude 'venv/' \
-        --exclude '__pycache__/' --exclude '*.pyc' \
+        --exclude '__pycache__/' --exclude '*.pyc' --exclude '.test-deps/' \
         --exclude 'pin_config.db' --exclude '*.log' \
         "$SRC_DIR/" "$APP_DIR/"
 fi
