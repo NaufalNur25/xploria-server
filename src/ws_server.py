@@ -100,7 +100,14 @@ def reject_json_constant(value):
 
 def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_session=None):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
-    
+    if isinstance(code_str, str):
+        if "\\n" in code_str:
+            code_str = code_str.replace("\\n", "\n")
+        if "\\r" in code_str:
+            code_str = code_str.replace("\\r", "\r")
+        if "\\t" in code_str:
+            code_str = code_str.replace("\\t", "\t")
+
     stop_event = stop_event or threading.Event()
 
     def check_stop():
