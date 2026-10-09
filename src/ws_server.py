@@ -201,6 +201,7 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
 
 
 async def handler(websocket):
+    global _global_primary_execution, _global_telemetry_execution
     client_addr = websocket.remote_address
     logging.info(f"Client connected: {client_addr}")
     connected_clients.add(websocket)
@@ -346,10 +347,14 @@ async def handler(websocket):
                 if msg_type == "stop" or cmd == "stop":
                     if "session_id" in data or "project_id" in data:
                         current_runtime(data)
-                    if data.get("execution_role") == "telemetry":
-                        stop_execution(telemetry_execution)
-                    else:
-                        stop_execution(execution)
+                    with _global_execution_lock:
+                        if data.get("execution_role") == "telemetry":
+                            stop_execution_global(_global_telemetry_execution)
+                            _global_telemetry_execution = None
+                        else:
+                            stop_execution_global(_global_primary_execution)
+                            _global_primary_execution = None
+                            voice.clear()
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
