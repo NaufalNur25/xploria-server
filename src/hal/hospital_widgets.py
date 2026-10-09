@@ -137,7 +137,9 @@ class HospitalWidgetSession:
         if len(labels) != len(set(labels)):
             raise ValueError("Setiap pertanyaan dalam formulir harus memiliki label berbeda.")
         if any(f["name"] == name and key != uid for key, f in self.forms.items()):
-            raise ValueError("Gunakan nama berbeda untuk setiap formulir: " + name)
+            raise ValueError(
+                f"Formulir dengan nama '{name}' sudah dibuat oleh blok lain. Gunakan hanya satu balok formulir untuk nama ini, atau gunakan nama yang berbeda."
+            )
         self.forms[uid] = {"name": name, "fields": fields}
         self.emit("form", block_uid=uid, name=name, fields=fields)
 
@@ -198,9 +200,27 @@ class HospitalWidgetSession:
 
     def answer(self, key):
         answers = self.input("answers")
-        if key not in answers:
-            raise ValueError("Jawaban '%s' belum tersedia pada formulir ini." % key)
-        return answers[key]
+        if key in answers:
+            return answers[key]
+        norm_key = str(key).strip().lower()
+        for k, v in answers.items():
+            if str(k).strip().lower() == norm_key:
+                return v
+        aliases = {
+            "nama": ["nama pasien", "nama", "nama_pasien", "patient_name"],
+            "nama pasien": ["nama", "nama pasien", "nama_pasien"],
+            "keluhan": ["keluhan / penyakit", "keluhan", "penyakit", "complaint"],
+            "keluhan / penyakit": ["keluhan", "keluhan / penyakit", "penyakit"],
+            "ruang penanganan": ["ruangan", "tujuan", "ruang tujuan", "ruang penanganan", "poli"],
+            "ruang tujuan": ["ruangan", "tujuan", "ruang tujuan", "ruang penanganan", "poli"],
+            "ruangan": ["ruang penanganan", "ruang tujuan", "tujuan", "ruangan", "poli"],
+            "tujuan": ["ruang penanganan", "ruang tujuan", "ruangan", "tujuan", "poli"],
+        }
+        for alias in aliases.get(norm_key, []):
+            for k, v in answers.items():
+                if str(k).strip().lower() == alias:
+                    return v
+        raise ValueError("Jawaban '%s' belum tersedia pada formulir ini." % key)
 
     def command(self, operation, **arguments):
         if not self.active:
@@ -346,6 +366,25 @@ class HospitalWidgetSession:
 
     def queue_push(self, patient, room):
         return self.command("queue_push", patient=patient, room=room)
+
+    def queue_push_from_form(self, patient=None):
+        if patient is None:
+            patient = self.get_last_registered_patient()
+        room = None
+        if self.context and "answers" in self.context and isinstance(self.context["answers"], dict):
+            answers = self.context["answers"]
+            for candidate in ["Ruang Penanganan", "Ruang Tujuan", "Ruangan", "Tujuan", "ruang", "tujuan"]:
+                val = next((v for k, v in answers.items() if str(k).strip().lower() == candidate.lower()), None)
+                if val:
+                    room = str(val).strip()
+                    break
+        if not room and self.context and self.context.get("last_patient"):
+            last_p = self.context["last_patient"]
+            if isinstance(last_p, dict):
+                room = last_p.get("tujuan") or last_p.get("ruangan")
+        if not room:
+            room = "Ruang Pemeriksaan"
+        return self.queue_push(patient, room)
 
     def waiting(self, room, group=None):
         rows = [r for r in self.DATA_IOTLAB.get("antrean", []) if r.get("tujuan") == room
