@@ -59,6 +59,17 @@ sys.modules["xploria_hal"] = _xploria_hal_module
 
 connected_clients = set()
 
+# Global execution tracker untuk membunuh zombie thread secara server-wide
+_global_execution_lock = threading.Lock()
+_global_primary_execution = None
+_global_telemetry_execution = None
+
+def stop_execution_global(target):
+    if target is not None:
+        target["stop"].set()
+        if target["runtime"] is not None:
+            target["runtime"].stop()
+
 # Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
 _main_loop: asyncio.AbstractEventLoop = None
 
@@ -259,13 +270,16 @@ async def handler(websocket):
                     if execution_role not in ("primary", "telemetry"):
                         raise ValueError("Peran eksekusi tidak didukung.")
                     target = {"stop": threading.Event(), "runtime": runtime, "role": execution_role}
-                    if execution_role == "telemetry":
-                        stop_execution(telemetry_execution)
-                        telemetry_execution = target
-                    else:
-                        stop_execution(execution)
-                        voice.clear()
-                        execution = target
+                    with _global_execution_lock:
+                        if execution_role == "telemetry":
+                            stop_execution_global(_global_telemetry_execution)
+                            _global_telemetry_execution = target
+                            telemetry_execution = target
+                        else:
+                            stop_execution_global(_global_primary_execution)
+                            voice.clear()
+                            _global_primary_execution = target
+                            execution = target
                     executions.add(target["stop"])
                     task = asyncio.create_task(run_in_background(code, target))
                     tasks.add(task)
