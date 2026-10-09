@@ -56,7 +56,7 @@ def get_voice_text():
         return _TEXT
 
 
-def contains_all(*keywords):
+def contains_all(*keywords, auto_clear=True):
     required = []
     for keyword in keywords:
         required.extend(normalize(keyword).split())
@@ -67,10 +67,17 @@ def contains_all(*keywords):
         tokens = _TOKENS
     if not tokens or any(token in _NEGATIONS for token in tokens):
         return False
-    return all(
+
+    matched = all(
         any(_matches(spoken_token, keyword) for spoken_token in tokens)
         for keyword in required
     )
+
+    if matched and auto_clear:
+        clear()
+
+    return matched
+
 
 
 def clear():
