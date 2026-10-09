@@ -56,7 +56,7 @@ def get_voice_text():
         return _TEXT
 
 
-def contains_all(*keywords, max_age_secs=5.0):
+def contains_all(*keywords):
     required = []
     for keyword in keywords:
         required.extend(normalize(keyword).split())
@@ -65,27 +65,12 @@ def contains_all(*keywords, max_age_secs=5.0):
 
     with _LOCK:
         tokens = _TOKENS
-        updated_at = _UPDATED_AT
-
     if not tokens or any(token in _NEGATIONS for token in tokens):
         return False
-
-    # Jika ucapan sudah lebih dari max_age_secs (default 5 detik), anggap sudah kadaluwarsa
-    if updated_at is not None and max_age_secs is not None:
-        try:
-            now = datetime.now(timezone.utc)
-            dt = datetime.fromisoformat(updated_at)
-            if (now - dt).total_seconds() > max_age_secs:
-                return False
-        except Exception:
-            pass
-
     return all(
         any(_matches(spoken_token, keyword) for spoken_token in tokens)
         for keyword in required
     )
-
-
 
 
 def clear():
