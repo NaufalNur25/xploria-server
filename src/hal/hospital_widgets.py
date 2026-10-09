@@ -232,7 +232,10 @@ class HospitalWidgetSession:
         raise TimeoutError("Konfirmasi belum diterima. Periksa data sebelum mengulang transaksi.")
 
     def medicine(self):
-        barcode = self.input("barcode")
+        try:
+            barcode = self.input("barcode")
+        except ValueError:
+            return None
         return next((r for r in self.DATA_IOTLAB.get("obat", []) if r.get("barcode") == barcode), None)
 
     def is_medicine_recognized(self):
@@ -245,7 +248,7 @@ class HospitalWidgetSession:
         return (self.medicine() or {}).get("kategori", "")
 
     def get_medicine_stock(self):
-        medicine = self.medicine()
+        medicine = next((r for r in self.DATA_IOTLAB.get("obat", []) if r.get("barcode") == self.input("barcode")), None)
         if medicine is None:
             raise ValueError("Barcode obat belum dikenal.")
         return medicine.get("stok", 0)
