@@ -9,6 +9,7 @@ from .rgb import RGBHAL
 from .hospital import HospitalHAL
 from .mocks import DisplayHAL, MotionHAL, LANHAL, AIHAL, PowerHAL
 from .audio import AudioHAL
+from . import voice
 
 pin       = PinHAL()
 sensor    = SensorHAL()

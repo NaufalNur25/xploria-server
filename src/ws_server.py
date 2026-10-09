@@ -10,7 +10,7 @@ import threading
 
 from hal.hospital_widgets import HospitalWidgetSession
 
-from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital
+from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice
 from hal.sensor import stop_all_workers
 
 # Wrapper global untuk proxy
@@ -45,7 +45,8 @@ global_proxies = {
     "motion": HalProxy(motion),
     "lan": HalProxy(lan),
     "ai": HalProxy(ai),
-    "hospital": HalProxy(hospital)
+    "hospital": HalProxy(hospital),
+    "voice": HalProxy(voice)
 }
 
 # Buat modul virtual 'xploria_hal' agar kode Blockly yang menggunakan
@@ -57,6 +58,17 @@ for k, v in global_proxies.items():
 sys.modules["xploria_hal"] = _xploria_hal_module
 
 connected_clients = set()
+
+# Global execution tracker untuk membunuh zombie thread secara server-wide
+_global_execution_lock = threading.Lock()
+_global_primary_execution = None
+_global_telemetry_execution = None
+
+def stop_execution_global(target):
+    if target is not None:
+        target["stop"].set()
+        if target["runtime"] is not None:
+            target["runtime"].stop()
 
 # Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
 _main_loop: asyncio.AbstractEventLoop = None
@@ -99,7 +111,14 @@ def reject_json_constant(value):
 
 def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_session=None):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
-    
+    if isinstance(code_str, str):
+        if "\\n" in code_str:
+            code_str = code_str.replace("\\n", "\n")
+        if "\\r" in code_str:
+            code_str = code_str.replace("\\r", "\r")
+        if "\\t" in code_str:
+            code_str = code_str.replace("\\t", "\t")
+
     stop_event = stop_event or threading.Event()
 
     def check_stop():
@@ -182,10 +201,12 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
 
 
 async def handler(websocket):
+    global _global_primary_execution, _global_telemetry_execution
     client_addr = websocket.remote_address
     logging.info(f"Client connected: {client_addr}")
     connected_clients.add(websocket)
     execution = None
+    telemetry_execution = None
     executions = set()
     tasks = set()
 
@@ -220,7 +241,7 @@ async def handler(websocket):
                 if not isinstance(data, dict):
                     raise ValueError("Pesan harus berupa objek JSON.")
                 if data.get("type") == "capabilities":
-                    await websocket.send(json.dumps({"type": "capabilities", "request_id": data.get("request_id"), "hospital_widgets": 1}))
+                    await websocket.send(json.dumps({"type": "capabilities", "request_id": data.get("request_id"), "hospital_widgets": 1, "voice_commands": 1}))
                     continue
 
                 if data.get("type") == "run":
@@ -246,10 +267,22 @@ async def handler(websocket):
                             asyncio.run_coroutine_threadsafe(websocket.send(payload), loop)
                         runtime = HospitalWidgetSession(metadata["project_id"], metadata["session_id"], snapshot, send_widget, lambda _: None, sources, hospital)
                         runtime.data_version = version
-                    stop_execution(execution)
-                    execution = {"stop": threading.Event(), "runtime": runtime}
-                    executions.add(execution["stop"])
-                    task = asyncio.create_task(run_in_background(code, execution))
+                    execution_role = data.get("execution_role", "primary")
+                    if execution_role not in ("primary", "telemetry"):
+                        raise ValueError("Peran eksekusi tidak didukung.")
+                    target = {"stop": threading.Event(), "runtime": runtime, "role": execution_role}
+                    with _global_execution_lock:
+                        if execution_role == "telemetry":
+                            stop_execution_global(_global_telemetry_execution)
+                            _global_telemetry_execution = target
+                            telemetry_execution = target
+                        else:
+                            stop_execution_global(_global_primary_execution)
+                            voice.clear()
+                            _global_primary_execution = target
+                            execution = target
+                    executions.add(target["stop"])
+                    task = asyncio.create_task(run_in_background(code, target))
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
                     continue
@@ -273,10 +306,55 @@ async def handler(websocket):
                 cmd = data.get("command")
                 msg_type = data.get("type")
 
+                if msg_type == "voice_command":
+                    request_id = data.get("request_id")
+                    if data.get("is_final") is False:
+                        response = {
+                            "type": "voice_result",
+                            "request_id": request_id,
+                            "status": "ignored_partial",
+                        }
+                    else:
+                        spoken_text = data.get("text", "")
+                        if not isinstance(spoken_text, str) or not spoken_text.strip():
+                            response = {
+                                "type": "voice_result",
+                                "request_id": request_id,
+                                "status": "error",
+                                "message": "Voice text must be a non-empty string",
+                            }
+                        elif len(spoken_text) > 500:
+                            response = {
+                                "type": "voice_result",
+                                "request_id": request_id,
+                                "status": "error",
+                                "message": "Voice text is too long",
+                            }
+                        else:
+                            normalized = voice.set_voice_text(
+                                spoken_text,
+                                request_id=request_id,
+                            )
+                            response = {
+                                "type": "voice_result",
+                                "request_id": request_id,
+                                "status": "stored",
+                                "normalized_text": normalized,
+                            }
+                    await websocket.send(json.dumps(response))
+                    continue
+
                 if msg_type == "stop" or cmd == "stop":
                     if "session_id" in data or "project_id" in data:
                         current_runtime(data)
-                    stop_execution(execution)
+                    with _global_execution_lock:
+                        if data.get("execution_role") == "telemetry":
+                            stop_execution_global(_global_telemetry_execution)
+                            _global_telemetry_execution = None
+                        else:
+                            stop_execution_global(_global_primary_execution)
+                            _global_primary_execution = None
+                            voice.clear()
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
@@ -343,6 +421,7 @@ async def handler(websocket):
     finally:
         # Gunakan discard agar tidak raise KeyError jika client belum sempat ditambahkan
         stop_execution(execution)
+        stop_execution(telemetry_execution)
         for stop_event in executions:
             stop_event.set()
         connected_clients.discard(websocket)
