@@ -24,7 +24,9 @@ sensor_module.stop_all_workers = Mock()
 sys.modules['hal.sensor'] = sensor_module
 hospital_module = importlib.import_module('hal.hospital')
 hal.hospital = hospital_module.HospitalHAL()
+hal.voice = importlib.import_module('hal.voice')
 server = importlib.import_module('ws_server')
+# pyrefly: ignore [missing-import]
 import websockets
 
 
@@ -92,10 +94,36 @@ class NativeHospitalTests(unittest.IsolatedAsyncioTestCase):
     async def test_capabilities_and_legacy_python(self):
         await self.send({'type': 'capabilities', 'request_id': 'request'})
         packet = await self.receive(lambda p: p.get('type') == 'capabilities')
-        self.assertEqual(packet, {'type': 'capabilities', 'request_id': 'request', 'hospital_widgets': 1})
+        self.assertEqual(packet, {'type': 'capabilities', 'request_id': 'request',
+                                  'hospital_widgets': 1, 'voice_commands': 1,
+                                  'actuator_control': 1})
         await self.send({'type': 'run', 'code': "print('legacy works')"})
         output = await self.receive(lambda p: p.get('type') == 'output')
         self.assertIn('legacy works', output['payload'])
+
+    async def test_door_lock_control_uses_device_identity_and_returns_state(self):
+        hal.motor.reset_mock()
+        await self.send({
+            'type': 'control',
+            'request_id': 'ctrl-door-1',
+            'block_uid': 'block-door',
+            'block_type': 'sh_door_lock',
+            'hw_type': 'servo',
+            'device_key': 'servo.door_lock',
+            'channel': 'lock_state',
+            'command': 'set_lock_state',
+            'value': 1,
+        })
+        result = await self.receive(lambda p: p.get('type') == 'control_result')
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['device_key'], 'servo.door_lock')
+        self.assertEqual(result['value'], 1)
+        telemetry = await self.receive(
+            lambda p: p.get('type') == 'telemetry_delta' and
+            'servo.door_lock.lock_state' in p.get('telemetry', {})
+        )
+        self.assertEqual(telemetry['telemetry']['servo.door_lock.lock_state'], 1)
+        hal.motor.set_servo360.assert_called_once_with(12, 100, 1.0)
 
     async def test_full_form_definitions_are_not_deltas(self):
         await self.send({'type': 'run', 'code': FORM_PROGRAM, 'widget_session': {
@@ -227,6 +255,49 @@ hospital.on_scan('scan', scan)
                 break
             await asyncio.sleep(.01)
         self.assertNotIn(peer, server.connected_clients)
+
+    async def test_voice_command_reaches_primary_program_while_telemetry_runs(self):
+        await self.send({'type': 'run', 'code': '''
+import time
+from xploria_hal import voice
+while True:
+    if voice.contains_all("buka", "pintu"):
+        print("VOICE_TRIGGERED")
+        voice.clear()
+    time.sleep(0.01)
+'''})
+        await self.send({
+            'type': 'run',
+            'execution_role': 'telemetry',
+            'code': 'print("TELEMETRY_STARTED")',
+        })
+        await self.receive(
+            lambda packet: packet.get('type') == 'output'
+            and 'TELEMETRY_STARTED' in packet.get('payload', '')
+        )
+
+        await self.send({
+            'type': 'voice_command',
+            'request_id': 'voice-1',
+            'text': 'Tolong buka pintunya',
+            'is_final': True,
+        })
+        packets = []
+        while not (
+            any(packet.get('type') == 'voice_result' for packet in packets)
+            and any('VOICE_TRIGGERED' in packet.get('payload', '') for packet in packets)
+        ):
+            packets.append(json.loads(await asyncio.wait_for(self.client.recv(), 3)))
+        result = next(
+            packet for packet in packets if packet.get('type') == 'voice_result'
+        )
+        self.assertEqual(result['status'], 'stored')
+        self.assertEqual(result['normalized_text'], 'tolong buka pintunya')
+        output = next(
+            packet for packet in packets
+            if 'VOICE_TRIGGERED' in packet.get('payload', '')
+        )
+        self.assertIn('VOICE_TRIGGERED', output['payload'])
 
     async def test_jitsi_delegation_is_preserved(self):
         hal.telemetry.send.reset_mock()
