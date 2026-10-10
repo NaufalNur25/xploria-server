@@ -142,6 +142,16 @@ class NativeHospitalTests(unittest.IsolatedAsyncioTestCase):
         await self.send(self.event(answers={'nama': 'Ayu'}))
         self.assertEqual((await self.kind('event_ack'))['status'], 'rejected')
 
+    def test_duplicate_form_error_message(self):
+        session = server.HospitalWidgetSession('p', 's', {}, lambda **p: None, lambda _: None, ['f1', 'f2'], hal.hospital)
+        session.form('f1', 'Pendaftaran', [{'label': 'Nama Pasien', 'type': 'text'}])
+        with self.assertRaises(ValueError) as ctx:
+            session.form('f2', 'Pendaftaran', [{'label': 'Keluhan', 'type': 'text'}])
+        self.assertEqual(
+            str(ctx.exception),
+            "Formulir dengan nama 'Pendaftaran' sudah dibuat oleh blok lain. Gunakan hanya satu balok formulir untuk nama ini, atau gunakan nama yang berbeda."
+        )
+
     async def test_buttons_dispatch_once_to_the_correct_handler(self):
         await self.run_program(code='''
 def a(): hospital.report('result-a', 'display', 'A')
