@@ -241,7 +241,7 @@ async def handler(websocket):
                 if not isinstance(data, dict):
                     raise ValueError("Pesan harus berupa objek JSON.")
                 if data.get("type") == "capabilities":
-                    await websocket.send(json.dumps({"type": "capabilities", "request_id": data.get("request_id"), "hospital_widgets": 1, "voice_commands": 1}))
+                    await websocket.send(json.dumps({"type": "capabilities", "request_id": data.get("request_id"), "hospital_widgets": 1, "voice_commands": 1, "actuator_control": 1}))
                     continue
 
                 if data.get("type") == "run":
@@ -342,6 +342,76 @@ async def handler(websocket):
                                 "normalized_text": normalized,
                             }
                     await websocket.send(json.dumps(response))
+                    continue
+
+                # Metadata v2 pilot: only the Smart Home door-lock servo is
+                # accepted here. Other actuators keep using their legacy path
+                # until their device catalog entries are migrated.
+                if msg_type == "control":
+                    request_id = data.get("request_id")
+                    block_uid = data.get("block_uid")
+                    block_type = data.get("block_type")
+                    device_key = data.get("device_key")
+                    hw_type = data.get("hw_type")
+                    channel = data.get("channel")
+                    command = data.get("command")
+                    value = data.get("value")
+
+                    if not isinstance(request_id, str) or not request_id:
+                        raise ValueError("request_id kontrol diperlukan.")
+                    if not isinstance(block_uid, str) or not block_uid:
+                        raise ValueError("block_uid kontrol diperlukan.")
+
+                    if (block_type, device_key, hw_type, channel, command) != (
+                        "sh_door_lock", "servo.door_lock", "servo",
+                        "lock_state", "set_lock_state"
+                    ):
+                        response = {
+                            "type": "control_result",
+                            "request_id": request_id,
+                            "block_uid": block_uid,
+                            "device_key": device_key,
+                            "status": "error",
+                            "message": "Perangkat atau perintah kontrol belum didukung.",
+                        }
+                        await websocket.send(json.dumps(response))
+                        continue
+
+                    if isinstance(value, bool):
+                        is_open = value
+                    elif isinstance(value, (int, float)) and value in (0, 1):
+                        is_open = value == 1
+                    elif isinstance(value, str) and value.upper() in ("OPEN", "LOCK"):
+                        is_open = value.upper() == "OPEN"
+                    else:
+                        response = {
+                            "type": "control_result",
+                            "request_id": request_id,
+                            "block_uid": block_uid,
+                            "device_key": device_key,
+                            "status": "error",
+                            "message": "Nilai kunci pintu harus OPEN/LOCK atau 1/0.",
+                        }
+                        await websocket.send(json.dumps(response))
+                        continue
+
+                    speed = 100 if is_open else -100
+                    await asyncio.to_thread(motor.set_servo360, 12, speed, 1.0)
+                    normalized_value = 1 if is_open else 0
+                    await websocket.send(json.dumps({
+                        "type": "control_result",
+                        "request_id": request_id,
+                        "block_uid": block_uid,
+                        "device_key": device_key,
+                        "status": "ok",
+                        "value": normalized_value,
+                    }))
+                    await websocket.send(json.dumps({
+                        "type": "telemetry_delta",
+                        "telemetry": {
+                            "servo.door_lock.lock_state": normalized_value,
+                        },
+                    }))
                     continue
 
                 if msg_type == "stop" or cmd == "stop":
