@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import builtins
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import websockets
 import traceback
@@ -73,6 +75,38 @@ def stop_execution_global(target):
 # Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
 _main_loop: asyncio.AbstractEventLoop = None
 
+# Pool khusus program pengguna: terpisah dari default executor asyncio sehingga
+# program yang macet tidak menghalangi asyncio.to_thread milik bagian lain
+# (mis. kontrol servo) dan jumlah program serentak dibatasi.
+USER_EXECUTOR_WORKERS = 4
+_user_executor = None
+_user_executor_lock = threading.Lock()
+
+
+def get_user_executor():
+    global _user_executor
+    with _user_executor_lock:
+        if _user_executor is None:
+            _user_executor = ThreadPoolExecutor(
+                max_workers=USER_EXECUTOR_WORKERS,
+                thread_name_prefix="xploria-user",
+            )
+        return _user_executor
+
+
+def shutdown_user_executor():
+    """Hentikan semua program pengguna lalu tutup pool tanpa menunggu thread macet."""
+    global _user_executor, _global_primary_execution, _global_telemetry_execution
+    with _global_execution_lock:
+        stop_execution_global(_global_primary_execution)
+        stop_execution_global(_global_telemetry_execution)
+        _global_primary_execution = None
+        _global_telemetry_execution = None
+    with _user_executor_lock:
+        executor, _user_executor = _user_executor, None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+
 
 async def adhoc_telemetry_loop():
     """Kirim pesan ad-hoc (delta) dari Blockly (telemetry.send()) ke semua klien.
@@ -109,15 +143,33 @@ def reject_json_constant(value):
     raise ValueError("Angka JSON tidak valid: " + value)
 
 
+def unescape_single_line_code(code_str):
+    """Kode lama dikirim sebagai satu baris dengan '\\n' literal.
+
+    Hanya kode satu baris yang di-unescape. Kode multi-baris sudah benar, dan
+    '\\n' di dalam string-nya (mis. split('\\n')) tidak boleh diubah menjadi
+    baris baru karena merusak literal string.
+    """
+    if not isinstance(code_str, str) or "\n" in code_str:
+        return code_str
+    return (code_str.replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\t", "\t"))
+
+
+def _release_global_execution(stop_event):
+    """Kosongkan pelacak global hanya bila masih milik eksekusi ini."""
+    global _global_primary_execution, _global_telemetry_execution
+    with _global_execution_lock:
+        if _global_primary_execution and _global_primary_execution["stop"] is stop_event:
+            _global_primary_execution = None
+        if _global_telemetry_execution and _global_telemetry_execution["stop"] is stop_event:
+            _global_telemetry_execution = None
+
+
 def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_session=None):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
-    if isinstance(code_str, str):
-        if "\\n" in code_str:
-            code_str = code_str.replace("\\n", "\n")
-        if "\\r" in code_str:
-            code_str = code_str.replace("\\r", "\r")
-        if "\\t" in code_str:
-            code_str = code_str.replace("\\t", "\t")
+    code_str = unescape_single_line_code(code_str)
 
     stop_event = stop_event or threading.Event()
 
@@ -168,7 +220,7 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
     except ImportError: adafruit_dht = None
 
     exec_globals = {
-        "__builtins__": __builtins__,
+        "__builtins__": None,
         **local_proxies,
         "time": custom_time,
         "math": __import__("math"),
@@ -181,6 +233,28 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
     if widget_session is not None:
         widget_session._sleep = custom_sleep
         exec_globals["hospital"] = HalProxy(widget_session, check_stop)
+
+    # 'import time' / 'from xploria_hal import ...' di dalam program siswa
+    # biasanya melewati nama global di atas dan mengambil modul asli dari
+    # sys.modules (tanpa pemeriksaan stop). __import__ lokal ini mengarahkan
+    # keduanya ke versi per-eksekusi sehingga loop bisa dihentikan.
+    local_hal_module = types.ModuleType("xploria_hal")
+    for name, proxy in local_proxies.items():
+        setattr(local_hal_module, name, exec_globals.get(name, proxy))
+
+    real_import = builtins.__import__
+
+    def local_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if level == 0:
+            if name == "xploria_hal":
+                return local_hal_module
+            if name == "time":
+                return custom_time
+        return real_import(name, globals, locals, fromlist, level)
+
+    local_builtins = dict(vars(builtins))
+    local_builtins["__import__"] = local_import
+    exec_globals["__builtins__"] = local_builtins
 
     try:
         check_stop()
@@ -198,6 +272,10 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
     finally:
         if widget_session is not None:
             widget_session.close()
+        _release_global_execution(stop_event)
+        # Putuskan referensi (proxy HAL, widget_session, closure) agar tidak
+        # tertahan setelah program selesai.
+        exec_globals.clear()
 
 
 async def handler(websocket):
@@ -224,7 +302,11 @@ async def handler(websocket):
 
     async def run_in_background(code, target):
         try:
-            response = await asyncio.to_thread(execute_python_code, code, websocket, asyncio.get_running_loop(), target["stop"], target["runtime"])
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                get_user_executor(), execute_python_code,
+                code, websocket, loop, target["stop"], target["runtime"],
+            )
             await websocket.send(json.dumps(response))
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -518,4 +600,5 @@ async def start_server(host="0.0.0.0", port=9002):
                 await asyncio.gather(adhoc_task, return_exceptions=True)
             except Exception:
                 pass
+            shutdown_user_executor()
             stop_all_workers()

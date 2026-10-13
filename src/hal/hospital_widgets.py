@@ -1,4 +1,5 @@
 """Native, per-program Hospital APIs for Blockly and IoT Lab canvas widgets."""
+import collections
 import copy
 import math
 import threading
@@ -7,7 +8,36 @@ import time
 import uuid
 
 
+class BoundedSeen:
+    """Set id event dengan kapasitas tetap (yang terlama dibuang lebih dulu).
+
+    Deduplikasi tetap penuh untuk id dalam jendela terakhir; sesi panjang tidak
+    lagi menumbuhkan memori tanpa batas.
+    """
+
+    def __init__(self, limit):
+        self._items = set()
+        self._order = collections.deque()
+        self._limit = limit
+
+    def __contains__(self, item):
+        return item in self._items
+
+    def __len__(self):
+        return len(self._items)
+
+    def add(self, item):
+        if item in self._items:
+            return
+        if len(self._order) >= self._limit:
+            self._items.discard(self._order.popleft())
+        self._order.append(item)
+        self._items.add(item)
+
+
 class HospitalWidgetSession:
+    SEEN_LIMIT = 4096
+
     def __init__(self, project_id, session_id, data, send, sleep, sources, hal=None):
         self.project_id, self.session_id = project_id, session_id
         self.DATA_IOTLAB = data
@@ -18,13 +48,16 @@ class HospitalWidgetSession:
         self.events, self.results = queue.Queue(), {}
         self.handlers, self.forms = {}, {}
         self.context = None
-        self.seen = set()
+        self.seen = BoundedSeen(self.SEEN_LIMIT)
         self.received = set()
         self.pending = set()
         self._lock = threading.Lock()
         self._hal = hal
         self.ready = False
         self._closed = False
+        self.robot_driver = None
+        self._robot_destination = None
+        self.scan_mode_override = None
 
     def __getattr__(self, name):
         # Preserve existing HospitalHAL APIs, including Jitsi.
@@ -168,6 +201,8 @@ class HospitalWidgetSession:
             self.data_version = version
         self.context = copy.deepcopy(event)
         self.context.update(stock_success=False, last_patient=None, last_delivery=None)
+        if topic == "scan" and self.scan_mode_override is not None:
+            self.context["mode"] = self.scan_mode_override
         try:
             handler()
         finally:
@@ -277,8 +312,13 @@ class HospitalWidgetSession:
         return self.input("mode")
 
     def set_scan_mode(self, mode):
-        self.input("barcode")
-        self.context["mode"] = mode  # Compatibility for a saved legacy block.
+        # Blok menentukan mode pindai: berlaku untuk event berikutnya dan,
+        # bila dipanggil di dalam event, untuk event yang sedang berjalan.
+        if mode not in ("in", "out"):
+            raise ValueError("Mode pindai harus 'in' atau 'out'.")
+        self.scan_mode_override = mode
+        if self.context is not None:
+            self.context["mode"] = mode
 
     def record_medicine_stock(self, qty=None, task=None):
         arguments = dict(barcode=self.input("barcode"), mode=self.get_scan_mode(),
@@ -412,6 +452,30 @@ class HospitalWidgetSession:
     def filter_data(self, rows, key, value):
         key = {"Keluhan / Penyakit": "keluhan", "Nama Pasien": "nama"}.get(key, key)
         return [r for r in rows if str(r.get(key, "")) == str(value)]
+
+    def set_robot_driver(self, driver):
+        """Daftarkan driver robot fisik.
+
+        Driver cukup menyediakan metode bernama sama dengan aksi blok
+        (set_destination, follow_to_cross, turn, follow_until_color, stop,
+        play_welcome, go_to_room, is_arrived, move, turn_robot) dan mengirim
+        telemetri ambulance_step / ambulance_color / robot_arrived yang sama
+        dengan simulasi aplikasi.
+        """
+        self.robot_driver = driver
+
+    def robot_destination(self):
+        return self._robot_destination
+
+    def robot_command(self, uid, action, **params):
+        handler = getattr(self.robot_driver, action, None)
+        if not callable(handler):
+            return self.unsupported(uid, "Robot ambulans")
+        result = handler(**params)
+        if action == "set_destination":
+            self._robot_destination = params.get("color")
+        self.report(uid, "robot_" + action, True if result is None else result)
+        return result
 
     def unsupported(self, uid, capability):
         message = capability + " belum tersedia pada HAL perangkat."
