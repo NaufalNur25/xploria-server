@@ -14,6 +14,7 @@ from hal.hospital_widgets import HospitalWidgetSession
 
 from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice
 from hal.sensor import stop_all_workers
+from hal import face
 
 # Wrapper global untuk proxy
 class HalProxy:
@@ -48,7 +49,8 @@ global_proxies = {
     "lan": HalProxy(lan),
     "ai": HalProxy(ai),
     "hospital": HalProxy(hospital),
-    "voice": HalProxy(voice)
+    "voice": HalProxy(voice),
+    "face": HalProxy(face)
 }
 
 # Buat modul virtual 'xploria_hal' agar kode Blockly yang menggunakan
@@ -258,7 +260,10 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
 
     try:
         check_stop()
-        exec(code_str, exec_globals)
+        def emit_camera(packet):
+            asyncio.run_coroutine_threadsafe(client_ws.send(json.dumps(packet)), loop)
+        with face.session(emit_camera, stop_event):
+            exec(code_str, exec_globals)
         if widget_session is not None and (widget_session.handlers or widget_session.forms):
             widget_session.run()
         check_stop()
@@ -287,6 +292,19 @@ async def handler(websocket):
     telemetry_execution = None
     executions = set()
     tasks = set()
+    camera_stop = None
+
+    async def camera_job(data, stopped):
+        loop = asyncio.get_running_loop()
+        def emit(packet):
+            asyncio.run_coroutine_threadsafe(websocket.send(json.dumps(packet)), loop)
+        def work():
+            with face.session(emit, stopped, 'widget', data.get('request_id'), data.get('block_uid')):
+                try:
+                    face.perform(data.get('command'), data.get('value'))
+                except Exception:
+                    pass  # face.perform already returns a correlated error packet.
+        await asyncio.to_thread(work)
 
     def stop_execution(target):
         if target is not None:
@@ -426,6 +444,26 @@ async def handler(websocket):
                     await websocket.send(json.dumps(response))
                     continue
 
+                if msg_type == "control" and data.get("hw_type") == "esp32_cam":
+                    if not isinstance(data.get("request_id"), str) or not data["request_id"]:
+                        raise ValueError("request_id kamera diperlukan.")
+                    if data.get("command") not in face.COMMANDS:
+                        await websocket.send(json.dumps({"type": "camera_result",
+                            "request_id": data["request_id"], "status": "error",
+                            "message": "Perintah kamera tidak didukung."}))
+                        continue
+                    if camera_stop is not None and not camera_stop.is_set():
+                        await websocket.send(json.dumps({"type": "camera_result",
+                            "request_id": data["request_id"], "status": "error",
+                            "message": "Kamera sedang digunakan."}))
+                        continue
+                    camera_stop = threading.Event()
+                    task = asyncio.create_task(camera_job(dict(data), camera_stop))
+                    task.add_done_callback(lambda _, event=camera_stop: event.set())
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    continue
+
                 # Metadata v2 pilot: only the Smart Home door-lock servo is
                 # accepted here. Other actuators keep using their legacy path
                 # until their device catalog entries are migrated.
@@ -497,6 +535,8 @@ async def handler(websocket):
                     continue
 
                 if msg_type == "stop" or cmd == "stop":
+                    if camera_stop is not None:
+                        camera_stop.set()
                     if "session_id" in data or "project_id" in data:
                         current_runtime(data)
                     with _global_execution_lock:
@@ -572,6 +612,8 @@ async def handler(websocket):
         pass
     finally:
         # Gunakan discard agar tidak raise KeyError jika client belum sempat ditambahkan
+        if camera_stop is not None:
+            camera_stop.set()
         stop_execution(execution)
         stop_execution(telemetry_execution)
         for stop_event in executions:
