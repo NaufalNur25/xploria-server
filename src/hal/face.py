@@ -2,6 +2,7 @@
 import base64
 from contextlib import contextmanager
 import hashlib
+import math
 import os
 from pathlib import Path
 import struct
@@ -224,7 +225,8 @@ class FaceService:
             vectors = np.vstack((vectors, old_vectors))
         scores = np.clip(vectors @ vector, -1., 1.) if len(names) else np.array([])
         score = float(np.max(scores)) if len(names) else None
-        threshold = float(os.environ.get('XPLORIA_FACE_THRESHOLD', '0.363'))
+        threshold = (float(name) if command == 'face_recognized' and name is not None
+                     else float(os.environ.get('XPLORIA_FACE_THRESHOLD', '0.363')))
         if not -1 <= threshold <= 1:
             raise ValueError('Threshold cosine harus antara -1 dan 1.')
         recognized = score is not None and score >= threshold
@@ -279,6 +281,26 @@ def enroll(name):
 
 def is_recognized():
     return perform('face_recognized')['recognized']
+
+
+def is_recognized_at_least(percent):
+    """Capture once and compare its cosine score to a Blockly percentage (0-100)."""
+    if isinstance(percent, bool):
+        raise ValueError('Batas kemiripan harus angka antara 0 dan 100.')
+    try:
+        percent = float(percent)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError('Batas kemiripan harus angka antara 0 dan 100.') from error
+    if not math.isfinite(percent) or not 0 <= percent <= 100:
+        raise ValueError('Batas kemiripan harus angka antara 0 dan 100.')
+    return perform('face_recognized', percent / 100)['recognized']
+
+
+def get_last_similarity_percent():
+    """Read the most recent recognition score without asking the camera again."""
+    result = (getattr(_context, 'state', None) or {}).get('last') or {}
+    score = result.get('similarity') if 'recognized' in result else None
+    return round(max(0.0, min(1.0, float(score))) * 100, 1) if score is not None else 0.0
 
 
 def get_recognized_name():
