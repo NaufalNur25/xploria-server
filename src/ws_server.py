@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import json
 import logging
+import re
 import builtins
 import sys
 import types
@@ -406,6 +408,33 @@ async def handler(websocket):
                 cmd = data.get("command")
                 msg_type = data.get("type")
 
+                if msg_type == "upload_audio":
+                    slot = str(data.get("slot", "slot_1")).lower().strip()
+                    base64_data = data.get("data", "")
+                    if "," in base64_data:
+                        base64_data = base64_data.split(",", 1)[1]
+                    try:
+                        if not re.match(r"^[a-zA-Z0-9_\-]+$", slot):
+                            raise ValueError(f"Nama slot '{slot}' tidak valid. Hanya alfanumerik, underscore, dan dash yang diizinkan.")
+                        audio_bytes = base64.b64decode(base64_data, validate=True)
+                        saved_path = str(audio.save_custom_audio(slot, audio_bytes))
+                        response = {
+                            "type": "audio_upload_result",
+                            "slot": slot,
+                            "status": "ok",
+                            "message": f"Audio {slot} berhasil disimpan ke {saved_path}",
+                            "path": saved_path,
+                        }
+                    except Exception as e:
+                        response = {
+                            "type": "audio_upload_result",
+                            "slot": slot,
+                            "status": "error",
+                            "message": f"Gagal menyimpan audio: {e}",
+                        }
+                    await websocket.send(json.dumps(response))
+                    continue
+
                 if msg_type == "voice_command":
                     request_id = data.get("request_id")
                     if data.get("is_final") is False:
@@ -547,6 +576,7 @@ async def handler(websocket):
                             stop_execution_global(_global_primary_execution)
                             _global_primary_execution = None
                             voice.clear()
+                            audio.stop()
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
