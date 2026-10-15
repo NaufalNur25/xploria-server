@@ -143,26 +143,19 @@ class AudioHAL:
         print(f"[AudioHAL] Memutar suara rekaman {slot_name} di speaker (wait={wait})...")
         self._play_file(filename, wait=wait)
 
-    def record(self, slot_name: str, duration: int = 3):
-        """Merekam suara secara langsung dari mikrofon fisik Pi (jika terpasang)."""
-        target = sanitize_slot_name(slot_name)
+    def record(self, slot_name: str, duration: int = 3) -> bool:
+        """Perekaman suara dilakukan dari aplikasi HP siswa. Raspberry Pi tidak menjalankan fungsi merekam fisik."""
+        try:
+            target = sanitize_slot_name(slot_name)
+        except ValueError:
+            target = "slot_1"
         filename = os.path.join(self.tmp_custom_dir, f"{target}.wav")
-        print(f"[AudioHAL] Merekam audio ke {filename} selama {duration} detik...")
-        if sys.platform.startswith("linux"):
-            try:
-                subprocess.run(
-                    ["arecord", "-D", "default", "-d", str(int(duration)), "-f", "cd", "-t", "wav", filename],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=float(duration) + 2.0
-                )
-                print(f"[AudioHAL] Selesai merekam: {filename}")
-            except Exception as e:
-                print(f"[AudioHAL] Gagal merekam: {e}", file=sys.stderr)
+        if os.path.exists(filename) and os.path.getsize(filename) >= 44:
+            print(f"[AudioHAL] Slot '{target}' menggunakan rekaman suara dari aplikasi HP siswa ({filename})")
+            return True
         else:
-            import time
-            time.sleep(float(duration))
-            print(f"[AudioHAL] [MOCK] Rekaman {target} selesai disimpan.")
+            print(f"[AudioHAL] Info: Slot '{target}' direkam melalui aplikasi HP siswa (berkas fisik di Pi belum sinkron).")
+            return True
 
     def stop(self):
         """Menghentikan pemutaran audio yang sedang berjalan."""
