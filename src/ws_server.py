@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import os
 import json
 import logging
 import re
@@ -85,6 +86,32 @@ _main_loop: asyncio.AbstractEventLoop = None
 USER_EXECUTOR_WORKERS = 4
 _user_executor = None
 _user_executor_lock = threading.Lock()
+
+# --- Batas unggah audio rekaman siswa (Pi 3B, multi-client) ---
+# Frame WebSocket dibatasi 1 MiB (max_size di start_server); base64 menggembung 4/3,
+# sehingga payload audio maksimum praktis ~768 KB. Gerbang di sini lebih ketat (~512 KB
+# audio = ~16 detik PCM 16kHz mono) dan dicek SEBELUM decode.
+MAX_UPLOAD_B64_CHARS = 700_000
+# Hanya 1 upload diproses serentak di seluruh klien; sisanya antre tanpa memblokir event loop.
+_audio_upload_semaphore: "asyncio.Semaphore" = None
+
+
+def _store_uploaded_audio(slot: str, base64_data: str):
+    """Jalan di worker thread: decode base64, lewati penulisan bila isi identik.
+
+    Mengembalikan (path, changed). Dedupe mencegah tulis ulang + churn LRU ketika
+    banyak klien/penekanan 'Run' berulang mengirim rekaman yang sama.
+    """
+    audio_bytes = base64.b64decode(base64_data, validate=True)
+    existing = audio._resolve_custom_path(slot)
+    try:
+        if os.path.exists(existing) and os.path.getsize(existing) == len(audio_bytes):
+            with open(existing, "rb") as f:
+                if f.read() == audio_bytes:
+                    return str(existing), False
+    except OSError:
+        pass
+    return str(audio.save_custom_audio(slot, audio_bytes)), True
 
 
 def get_user_executor():
@@ -411,18 +438,29 @@ async def handler(websocket):
                 if msg_type == "upload_audio":
                     slot = str(data.get("slot", "slot_1")).lower().strip()
                     base64_data = data.get("data", "")
-                    if "," in base64_data:
+                    if not isinstance(base64_data, str):
+                        base64_data = ""
+                    if "," in base64_data[:128]:
                         base64_data = base64_data.split(",", 1)[1]
                     try:
                         if not re.match(r"^[a-zA-Z0-9_\-]+$", slot):
                             raise ValueError(f"Nama slot '{slot}' tidak valid. Hanya alfanumerik, underscore, dan dash yang diizinkan.")
-                        audio_bytes = base64.b64decode(base64_data, validate=True)
-                        saved_path = str(audio.save_custom_audio(slot, audio_bytes))
+                        # Gerbang murah SEBELUM decode: tolak payload raksasa tanpa memakan CPU/RAM.
+                        if len(base64_data) > MAX_UPLOAD_B64_CHARS:
+                            raise ValueError("Ukuran audio melebihi batas unggah.")
+                        # Decode + tulis file di worker thread (bukan event loop) dan dibatasi
+                        # 1 upload serentak agar multi-client tidak membuat telemetry/servo lag.
+                        async with _audio_upload_semaphore:
+                            saved_path, changed = await asyncio.to_thread(
+                                _store_uploaded_audio, slot, base64_data
+                            )
                         response = {
                             "type": "audio_upload_result",
                             "slot": slot,
                             "status": "ok",
-                            "message": f"Audio {slot} berhasil disimpan ke {saved_path}",
+                            "unchanged": not changed,
+                            "client_count": len(connected_clients),
+                            "message": f"Audio {slot} {'berhasil disimpan' if changed else 'sudah up-to-date'}",
                             "path": saved_path,
                         }
                     except Exception as e:
@@ -653,8 +691,9 @@ async def handler(websocket):
 
 
 async def start_server(host="0.0.0.0", port=9002):
-    global _main_loop
+    global _main_loop, _audio_upload_semaphore
     _main_loop = asyncio.get_running_loop()
+    _audio_upload_semaphore = asyncio.Semaphore(1)
     telemetry._ensure_queue()
     telemetry._loop = _main_loop  # Simpan loop reference untuk thread-safe queue access
 

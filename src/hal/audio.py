@@ -10,9 +10,10 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 
 MAX_AUDIO_TMP_BYTES = 10 * 1024 * 1024  # 10 MB quota limit
-MAX_SINGLE_AUDIO_BYTES = 2 * 1024 * 1024  # 2 MB per clip
+MAX_SINGLE_AUDIO_BYTES = 512 * 1024  # 512 KB per clip (selaras max_size WS 1 MiB setelah base64)
 
 
 def sanitize_slot_name(slot_name: str) -> str:
@@ -72,6 +73,8 @@ class AudioHAL:
         os.makedirs(self.tmp_custom_dir, exist_ok=True)
 
         self._current_process = None
+        self._current_filepath = None
+        self._last_play_time = 0.0
         self._lock = threading.Lock()
 
     def save_custom_audio(self, slot_name: str, audio_bytes: bytes) -> str:
@@ -83,7 +86,7 @@ class AudioHAL:
         if len(audio_bytes) < 44:
             raise ValueError("Ukuran audio terlalu kecil untuk berkas WAV (minimal 44 bytes).")
         if len(audio_bytes) > MAX_SINGLE_AUDIO_BYTES:
-            raise ValueError(f"Ukuran audio melebihi batas maksimal ({MAX_SINGLE_AUDIO_BYTES // (1024*1024)} MB).")
+            raise ValueError(f"Ukuran audio melebihi batas maksimal ({MAX_SINGLE_AUDIO_BYTES // 1024} KB).")
 
         # Validasi header RIFF...WAVE
         if not (audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE"):
@@ -120,9 +123,8 @@ class AudioHAL:
 
         return tmp_path
 
-    def play(self, sound_name: str, wait: bool = False):
+    def play(self, sound_name: str, wait: bool = True) -> bool:
         """Memutar file suara preset (misal: DOORBELL, WARNING)."""
-        self.stop()
         try:
             target = sanitize_slot_name(sound_name)
         except ValueError:
@@ -130,18 +132,16 @@ class AudioHAL:
         filename = os.path.join(self.preset_dir, f"{target}.wav")
         if not os.path.exists(filename):
             print(f"[AudioHAL] File suara preset tidak ditemukan: {filename}", file=sys.stderr)
-            return
-        self._play_file(filename, wait=wait)
+            return False
+        return self._play_file(filename, wait=wait)
 
-    def play_custom(self, slot_name: str, wait: bool = True):
+    def play_custom(self, slot_name: str, wait: bool = True) -> bool:
         """Memutar file suara rekaman siswa (misal: slot_1, slot_2) dari /tmp atau repo."""
-        self.stop()
         filename = self._resolve_custom_path(slot_name)
         if not os.path.exists(filename):
             print(f"[AudioHAL] Suara rekaman slot '{slot_name}' belum tersedia ({filename})", file=sys.stderr)
-            return
-        print(f"[AudioHAL] Memutar suara rekaman {slot_name} di speaker (wait={wait})...")
-        self._play_file(filename, wait=wait)
+            return False
+        return self._play_file(filename, wait=wait)
 
     def record(self, slot_name: str, duration: int = 3) -> bool:
         """Perekaman suara dilakukan dari aplikasi HP siswa. Raspberry Pi tidak menjalankan fungsi merekam fisik."""
@@ -167,6 +167,7 @@ class AudioHAL:
                 except Exception:
                     pass
             self._current_process = None
+            self._current_filepath = None
 
             if sys.platform.startswith("win"):
                 try:
@@ -175,8 +176,27 @@ class AudioHAL:
                 except Exception:
                     pass
 
-    def _play_file(self, filepath: str, wait: bool = False):
-        """Memutar berkas audio via ALSA aplay (Linux) atau winsound (Windows) bebas race condition."""
+    def _play_file(self, filepath: str, wait: bool = False) -> bool:
+        """Memutar berkas audio via ALSA aplay (Linux) atau winsound (Windows) dengan proteksi loop & zombie."""
+        now = time.monotonic()
+
+        # 1. Proteksi perulangan ketat (tight loop): jika suara yang sama sedang aktif di latar
+        # belakang (wait=False), biarkan berputar tuntas tanpa dimatikan dan di-restart berulang kali.
+        if not wait:
+            with self._lock:
+                if self._current_filepath == filepath and self._current_process and self._current_process.poll() is None:
+                    return True
+
+        # 2. Rate-limiting / debounce cepat: minimal jeda 80ms antar pemanggilan untuk melindungi driver ALSA
+        with self._lock:
+            elapsed = now - self._last_play_time
+            if elapsed < 0.08:
+                time.sleep(0.08 - elapsed)
+            self._last_play_time = time.monotonic()
+
+        # Hentikan audio sebelumnya sebelum memulai yang baru
+        self.stop()
+
         try:
             if sys.platform.startswith("linux"):
                 proc = None
@@ -187,6 +207,8 @@ class AudioHAL:
                         stderr=subprocess.DEVNULL
                     )
                     self._current_process = proc
+                    self._current_filepath = filepath
+
                 if wait and proc:
                     try:
                         proc.wait(timeout=15.0)
@@ -198,15 +220,47 @@ class AudioHAL:
                     with self._lock:
                         if self._current_process is proc:
                             self._current_process = None
+                            self._current_filepath = None
+                elif not wait and proc:
+                    # Thread reaper background pasif: me-reap exit code proses setelah selesai
+                    # guna mencegah zombie process (<defunct>) di tabel proses Linux.
+                    def _reap_process(p, path):
+                        try:
+                            p.wait(timeout=20.0)
+                        except Exception:
+                            try:
+                                p.kill()
+                                p.wait(timeout=2.0)
+                            except Exception:
+                                pass
+                        with self._lock:
+                            if self._current_process is p:
+                                self._current_process = None
+                                if self._current_filepath == path:
+                                    self._current_filepath = None
+
+                    reaper = threading.Thread(
+                        target=_reap_process,
+                        args=(proc, filepath),
+                        name=f"audio-reaper-{os.path.basename(filepath)}",
+                        daemon=True,
+                    )
+                    reaper.start()
+
             elif sys.platform.startswith("win"):
                 import winsound
                 flags = winsound.SND_FILENAME
                 if not wait:
                     flags |= winsound.SND_ASYNC
+                with self._lock:
+                    self._current_filepath = filepath
                 winsound.PlaySound(filepath, flags)
-            print(f"[AudioHAL] Selesai memutar suara: {filepath}")
+
+            print(f"[AudioHAL] Memutar suara: {filepath} (wait={wait})")
+            return True
         except Exception as e:
             print(f"[AudioHAL] Gagal memutar file audio: {e}", file=sys.stderr)
+            return False
 
 
 # Singleton HAL instance
