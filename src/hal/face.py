@@ -207,21 +207,32 @@ class FaceService:
         check_stop()
         if command == 'face_enroll':
             name = name.strip()
-            # Re-enrollment replaces the same person's sample; names are case sensitive.
-            keep = names != name
-            self.save_dataset(np.append(names[keep], name), np.vstack((vectors[keep], vector)))
-            return dict(result, message='Wajah %s berhasil didaftarkan.' % name, name=name)
+            # Keep existing samples, including datasets created by earlier releases.
+            count = int(np.count_nonzero(names == name))
+            limit = 5
+            if count >= limit:
+                return dict(result, name=name, sample_count=count, max_samples=limit,
+                            sample_added=False,
+                            message='Sampel %s sudah lengkap (%s/%s).' % (name, count, limit))
+            self.save_dataset(np.append(names, name), np.vstack((vectors, vector)))
+            return dict(result, name=name, sample_count=count + 1, max_samples=limit,
+                        sample_added=True,
+                        message='Sampel %s tersimpan (%s/%s).' % (name, count + 1, limit))
         old_names, old_vectors = self.load_legacy_dataset(len(vector))
         if len(old_names):
             names = np.concatenate((names, old_names))
             vectors = np.vstack((vectors, old_vectors))
-        score = float(np.max(vectors @ vector)) if len(names) else None
+        scores = np.clip(vectors @ vector, -1., 1.) if len(names) else np.array([])
+        score = float(np.max(scores)) if len(names) else None
         threshold = float(os.environ.get('XPLORIA_FACE_THRESHOLD', '0.363'))
         if not -1 <= threshold <= 1:
             raise ValueError('Threshold cosine harus antara -1 dan 1.')
         recognized = score is not None and score >= threshold
-        name = str(names[int(np.argmax(vectors @ vector))]) if recognized else ''
+        candidate = str(names[int(np.argmax(scores))]) if len(names) else ''
+        name = candidate if recognized else ''
         return dict(result, recognized=recognized, name=name, similarity=score,
+                    candidate_name=candidate, threshold=threshold,
+                    sample_count=int(np.count_nonzero(names == candidate)) if candidate else 0,
                     message=('Dikenali: ' + name) if recognized else 'Wajah tidak dikenali.')
 
 
