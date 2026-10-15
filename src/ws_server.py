@@ -102,7 +102,7 @@ def _store_uploaded_audio(slot: str, base64_data: str):
     Mengembalikan (path, changed). Dedupe mencegah tulis ulang + churn LRU ketika
     banyak klien/penekanan 'Run' berulang mengirim rekaman yang sama.
     """
-    audio_bytes = base64.b64decode(base64_data, validate=True)
+    audio_bytes = base64.b64decode(base64_data.strip())
     existing = audio._resolve_custom_path(slot)
     try:
         if os.path.exists(existing) and os.path.getsize(existing) == len(audio_bytes):
@@ -442,6 +442,7 @@ async def handler(websocket):
                         base64_data = ""
                     if "," in base64_data[:128]:
                         base64_data = base64_data.split(",", 1)[1]
+                    base64_data = base64_data.strip()
                     try:
                         if not re.match(r"^[a-zA-Z0-9_\-]+$", slot):
                             raise ValueError(f"Nama slot '{slot}' tidak valid. Hanya alfanumerik, underscore, dan dash yang diizinkan.")
@@ -454,6 +455,7 @@ async def handler(websocket):
                             saved_path, changed = await asyncio.to_thread(
                                 _store_uploaded_audio, slot, base64_data
                             )
+                        logging.info(f"[AudioWS] Upload slot '{slot}' berhasil: {saved_path} (changed={changed}, clients={len(connected_clients)})")
                         response = {
                             "type": "audio_upload_result",
                             "slot": slot,
@@ -464,6 +466,7 @@ async def handler(websocket):
                             "path": saved_path,
                         }
                     except Exception as e:
+                        logging.error(f"[AudioWS] Gagal memproses upload slot '{slot}': {e}")
                         response = {
                             "type": "audio_upload_result",
                             "slot": slot,
