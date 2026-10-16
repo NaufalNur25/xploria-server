@@ -15,7 +15,7 @@ import threading
 
 from hal.hospital_widgets import HospitalWidgetSession
 
-from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice
+from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice, agri
 from hal.sensor import stop_all_workers
 from hal import face
 
@@ -52,6 +52,7 @@ global_proxies = {
     "lan": HalProxy(lan),
     "ai": HalProxy(ai),
     "hospital": HalProxy(hospital),
+    "agri": HalProxy(agri),
     "voice": HalProxy(voice),
     "face": HalProxy(face)
 }
@@ -716,3 +717,4 @@ async def start_server(host="0.0.0.0", port=9002):
                 pass
             shutdown_user_executor()
             stop_all_workers()
+            agri.stop_all()
