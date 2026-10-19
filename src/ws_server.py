@@ -535,6 +535,45 @@ async def handler(websocket):
                     task.add_done_callback(tasks.discard)
                     continue
 
+                if msg_type == "control" and data.get("pin") in (
+                    "sa_table_record",
+                    "sa_table_seed",
+                    "sa_table_clear",
+                    "sa_ai_analyze",
+                ):
+                    pin_name = str(data.get("pin"))
+                    value = data.get("value")
+                    if pin_name == "sa_table_record":
+                        await asyncio.to_thread(agri.table_record)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                        }
+                    elif pin_name == "sa_table_seed":
+                        seed_target = str(value or "moisture")
+                        await asyncio.to_thread(agri.table_seed, seed_target)
+                        ai_res = await asyncio.to_thread(agri.ai_state, seed_target)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                            "ai_result": ai_res,
+                        }
+                    elif pin_name == "sa_table_clear":
+                        await asyncio.to_thread(agri.table_clear)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                        }
+                    else:
+                        ai_target = str(value or "moisture_forecast")
+                        ai_res = await asyncio.to_thread(agri.ai_analyze, ai_target)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                            "ai_result": ai_res,
+                        }
+                    await websocket.send(json.dumps({
+                        "type": "telemetry",
+                        "telemetry": telemetry_payload,
+                    }))
+                    continue
+
                 # Metadata v2 pilot: only the Smart Home door-lock servo is
                 # accepted here. Other actuators keep using their legacy path
                 # until their device catalog entries are migrated.
