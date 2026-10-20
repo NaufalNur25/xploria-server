@@ -85,7 +85,7 @@ class FaceTests(unittest.TestCase):
         service.feature = lambda jpeg: np.array([1., 0.], dtype=np.float32)
         return service
 
-    def test_enroll_reload_recognize_replace_clear(self):
+    def test_enroll_reload_recognize_append_clear(self):
         with tempfile.TemporaryDirectory() as directory:
             service = self.make_service(directory)
             service.operate('face_enroll', 'Andi')
@@ -93,11 +93,50 @@ class FaceTests(unittest.TestCase):
             self.assertEqual(reloaded.operate('face_recognized')['name'], 'Andi')
             reloaded.operate('face_enroll', 'Andi')
             names, _ = reloaded.load_dataset(2)
-            self.assertEqual(list(names), ['Andi'])
+            self.assertEqual(list(names), ['Andi', 'Andi'])
             reloaded.feature = lambda _: np.array([0., 1.], dtype=np.float32)
             self.assertFalse(reloaded.operate('face_recognized')['recognized'])
             reloaded.operate('face_clear')
             self.assertFalse(reloaded.dataset.exists())
+
+    def test_multiple_poses_count_limit_and_best_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory)
+            first = service.operate('face_enroll', 'Andi')
+            self.assertEqual(first['sample_count'], 1)
+            service.feature = lambda _: np.array([0., 1.], dtype=np.float32)
+            for expected in range(2, 6):
+                packet = service.operate('face_enroll', 'Andi')
+                self.assertEqual(packet['sample_count'], expected)
+                self.assertTrue(packet['sample_added'])
+            original = service.dataset.read_bytes()
+            packet = service.operate('face_enroll', 'Andi')
+            self.assertFalse(packet['sample_added'])
+            self.assertEqual(service.dataset.read_bytes(), original)
+            service.feature = lambda _: np.array([-1., 0.], dtype=np.float32)
+            service.operate('face_enroll', 'Budi')
+            service = self.make_service(directory)
+            for pose in ([1., 0.], [0., 1.]):
+                service.feature = lambda _, p=pose: np.array(p, dtype=np.float32)
+                packet = service.operate('face_recognized')
+                self.assertEqual(packet['name'], 'Andi')
+                self.assertEqual(packet['sample_count'], 5)
+                self.assertAlmostEqual(packet['similarity'], 1.)
+                self.assertIn('threshold', packet)
+            service.operate('face_clear')
+            self.assertFalse(service.dataset.exists())
+
+    def test_unrecognized_candidate_and_empty_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory)
+            self.assertIsNone(service.operate('face_recognized')['similarity'])
+            service.operate('face_enroll', 'Andi')
+            service.feature = lambda _: np.array([0., 1.], dtype=np.float32)
+            result = service.operate('face_recognized')
+            self.assertFalse(result['recognized'])
+            self.assertEqual(result['name'], '')
+            self.assertEqual(result['candidate_name'], 'Andi')
+            self.assertEqual(result['similarity'], 0.)
 
     def test_mismatched_dataset_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -5,10 +5,39 @@ class MockDevice:
         return method
 
 class AudioHAL(MockDevice): pass
-class DisplayHAL(MockDevice): pass
+class DisplayHAL(MockDevice):
+    def update_digital_factory_dashboard(self):
+        return True
+
 class MotionHAL(MockDevice): pass
 class LANHAL(MockDevice): pass
-class AIHAL(MockDevice): pass
+class CityHAL(MockDevice): pass
+
+class WMSHAL(MockDevice):
+    def calculate_oee_efficiency(self):
+        return 88.5
+
+    def check_in(self, item):
+        return True
+
+    def check_out(self, item):
+        return True
+
+    def get_inventory(self):
+        return []
+
+class AIHAL(MockDevice):
+    def inspect_vision_code(self):
+        return "PROD-A01"
+
+    def is_defect_detected(self):
+        return False
+
+    def verify_supply_chain_yield(self):
+        return 98.5
+
+    def forecast_production_release_time(self):
+        return "14:30"
 
 # Optional PowerHAL Mock
 class PowerHAL:

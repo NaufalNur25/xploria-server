@@ -2,6 +2,7 @@
 import base64
 from contextlib import contextmanager
 import hashlib
+import math
 import os
 from pathlib import Path
 import struct
@@ -207,21 +208,33 @@ class FaceService:
         check_stop()
         if command == 'face_enroll':
             name = name.strip()
-            # Re-enrollment replaces the same person's sample; names are case sensitive.
-            keep = names != name
-            self.save_dataset(np.append(names[keep], name), np.vstack((vectors[keep], vector)))
-            return dict(result, message='Wajah %s berhasil didaftarkan.' % name, name=name)
+            # Keep existing samples, including datasets created by earlier releases.
+            count = int(np.count_nonzero(names == name))
+            limit = 5
+            if count >= limit:
+                return dict(result, name=name, sample_count=count, max_samples=limit,
+                            sample_added=False,
+                            message='Sampel %s sudah lengkap (%s/%s).' % (name, count, limit))
+            self.save_dataset(np.append(names, name), np.vstack((vectors, vector)))
+            return dict(result, name=name, sample_count=count + 1, max_samples=limit,
+                        sample_added=True,
+                        message='Sampel %s tersimpan (%s/%s).' % (name, count + 1, limit))
         old_names, old_vectors = self.load_legacy_dataset(len(vector))
         if len(old_names):
             names = np.concatenate((names, old_names))
             vectors = np.vstack((vectors, old_vectors))
-        score = float(np.max(vectors @ vector)) if len(names) else None
-        threshold = float(os.environ.get('XPLORIA_FACE_THRESHOLD', '0.363'))
+        scores = np.clip(vectors @ vector, -1., 1.) if len(names) else np.array([])
+        score = float(np.max(scores)) if len(names) else None
+        threshold = (float(name) if command == 'face_recognized' and name is not None
+                     else float(os.environ.get('XPLORIA_FACE_THRESHOLD', '0.363')))
         if not -1 <= threshold <= 1:
             raise ValueError('Threshold cosine harus antara -1 dan 1.')
         recognized = score is not None and score >= threshold
-        name = str(names[int(np.argmax(vectors @ vector))]) if recognized else ''
+        candidate = str(names[int(np.argmax(scores))]) if len(names) else ''
+        name = candidate if recognized else ''
         return dict(result, recognized=recognized, name=name, similarity=score,
+                    candidate_name=candidate, threshold=threshold,
+                    sample_count=int(np.count_nonzero(names == candidate)) if candidate else 0,
                     message=('Dikenali: ' + name) if recognized else 'Wajah tidak dikenali.')
 
 
@@ -268,6 +281,26 @@ def enroll(name):
 
 def is_recognized():
     return perform('face_recognized')['recognized']
+
+
+def is_recognized_at_least(percent):
+    """Capture once and compare its cosine score to a Blockly percentage (0-100)."""
+    if isinstance(percent, bool):
+        raise ValueError('Batas kemiripan harus angka antara 0 dan 100.')
+    try:
+        percent = float(percent)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError('Batas kemiripan harus angka antara 0 dan 100.') from error
+    if not math.isfinite(percent) or not 0 <= percent <= 100:
+        raise ValueError('Batas kemiripan harus angka antara 0 dan 100.')
+    return perform('face_recognized', percent / 100)['recognized']
+
+
+def get_last_similarity_percent():
+    """Read the most recent recognition score without asking the camera again."""
+    result = (getattr(_context, 'state', None) or {}).get('last') or {}
+    score = result.get('similarity') if 'recognized' in result else None
+    return round(max(0.0, min(1.0, float(score))) * 100, 1) if score is not None else 0.0
 
 
 def get_recognized_name():

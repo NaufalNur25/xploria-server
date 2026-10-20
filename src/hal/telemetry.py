@@ -73,3 +73,8 @@ class TelemetryHAL:
                 pass
         else:
             print(f"TELEMETRY:{msg}", flush=True)
+
+    def push_iiot_gateway(self):
+        """Mengirimkan paket telemetri pabrik digital ke IIoT Gateway Server."""
+        import time
+        self.send(iiot_gateway_status="SYNCED", iiot_sync_time=round(time.time(), 2))

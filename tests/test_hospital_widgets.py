@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 hal = types.ModuleType('hal')
 hal.__path__ = [str(ROOT / 'src/hal')]
 for name in ('sensor', 'motor', 'led', 'rgb', 'ledstrip', 'power', 'rfid',
-             'telemetry', 'pin', 'audio', 'display', 'motion', 'lan', 'ai'):
+             'telemetry', 'pin', 'audio', 'display', 'motion', 'lan', 'ai', 'wms', 'city', 'robot'):
     setattr(hal, name, Mock())
 sys.modules['hal'] = hal
 sensor_module = types.ModuleType('hal.sensor')

@@ -10,7 +10,7 @@ import threading
 
 from hal.hospital_widgets import HospitalWidgetSession
 
-from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice
+from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice, agv, mobility, vehicle, arm, robotic_arm, tello, drone, vision, cv_follower, wms, city, robot
 from hal.sensor import stop_all_workers
 from hal import face
 
@@ -48,7 +48,19 @@ global_proxies = {
     "ai": HalProxy(ai),
     "hospital": HalProxy(hospital),
     "voice": HalProxy(voice),
-    "face": HalProxy(face)
+    "face": HalProxy(face),
+    "agv": HalProxy(agv),
+    "mobility": HalProxy(agv),
+    "vehicle": HalProxy(agv),
+    "arm": HalProxy(arm),
+    "robotic_arm": HalProxy(arm),
+    "tello": HalProxy(tello),
+    "drone": HalProxy(tello),
+    "vision": HalProxy(vision),
+    "cv_follower": HalProxy(vision),
+    "wms": HalProxy(wms),
+    "city": HalProxy(city),
+    "robot": HalProxy(robot)
 }
 
 # Buat modul virtual 'xploria_hal' agar kode Blockly yang menggunakan
@@ -58,6 +70,13 @@ _xploria_hal_module = types.ModuleType("xploria_hal")
 for k, v in global_proxies.items():
     setattr(_xploria_hal_module, k, v)
 sys.modules["xploria_hal"] = _xploria_hal_module
+
+# Virtual module compatibility shim untuk xploria_vehicle_hal dan vehicle_hal
+_vehicle_hal_module = types.ModuleType("xploria_vehicle_hal")
+for k, v in global_proxies.items():
+    setattr(_vehicle_hal_module, k, v)
+sys.modules["xploria_vehicle_hal"] = _vehicle_hal_module
+sys.modules["vehicle_hal"] = _vehicle_hal_module
 
 connected_clients = set()
 
@@ -74,6 +93,19 @@ def stop_execution_global(target):
 
 # Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
 _main_loop: asyncio.AbstractEventLoop = None
+
+
+async def agv_telemetry_loop():
+    # Kirim data telemetri AGV secara periodik (setiap 500ms) ke semua klien yang terhubung.
+    while True:
+        try:
+            if connected_clients:
+                telem_data = agv.get_telemetry()
+                msg = json.dumps({"type": "telemetry", "telemetry": telem_data})
+                websockets.broadcast(connected_clients, msg)
+        except Exception as e:
+            logging.error(f"Error in agv_telemetry_loop: {e}")
+        await asyncio.sleep(0.5)
 
 
 async def adhoc_telemetry_loop():
@@ -210,6 +242,13 @@ async def handler(websocket):
     client_addr = websocket.remote_address
     logging.info(f"Client connected: {client_addr}")
     connected_clients.add(websocket)
+    try:
+        await websocket.send(json.dumps({
+            "type": "output",
+            "payload": "Tersambung ke Server Xploria (Raspberry Pi)\n"
+        }))
+    except Exception:
+        pass
     execution = None
     telemetry_execution = None
     executions = set()
@@ -254,7 +293,13 @@ async def handler(websocket):
         async for message in websocket:
             data = None
             try:
-                data = json.loads(message, parse_constant=reject_json_constant)
+                try:
+                    data = json.loads(message, parse_constant=reject_json_constant)
+                except Exception:
+                    if isinstance(message, str) and message.strip():
+                        data = {"type": "run", "code": message}
+                    else:
+                        raise
 
                 if not isinstance(data, dict):
                     raise ValueError("Pesan harus berupa objek JSON.")
@@ -465,6 +510,8 @@ async def handler(websocket):
                             stop_execution_global(_global_primary_execution)
                             _global_primary_execution = None
                             voice.clear()
+                    agv.stop()
+                    arm.stop("ALL")
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
@@ -511,6 +558,100 @@ async def handler(websocket):
                         await websocket.send(json.dumps(response))
                     continue
 
+                if msg_type == "ping":
+                    await websocket.send(json.dumps({"type": "pong"}))
+                    continue
+
+                if msg_type == "robot_arm":
+                    motor_id = data.get("motor", "")
+                    action = data.get("action", "")
+                    state = data.get("state", "")
+                    spd = int(data.get("speed", 100))
+                    if motor_id == "LIGHT":
+                        val = bool(data.get("value", action.lower() == "on"))
+                        arm.set_light(val)
+                    elif action == "preset":
+                        preset = data.get("preset", "")
+                        if preset == "homePark": arm.home()
+                        elif preset == "conveyorPick": arm.pick_conveyor_1()
+                        elif preset == "conveyorPlace": arm.place_conveyor_2()
+                        elif preset == "inspectionPose": arm.inspection_pose()
+                    elif action in ("emergency_stop", "stop") or state == "stop":
+                        arm.stop(motor_id if motor_id and motor_id != "ALL" else "ALL")
+                    else:
+                        arm.drive(motor_id, action, spd)
+                    continue
+
+                if msg_type == "cmd":
+                    action = data.get("action", "")
+                    spd = data.get("speed", 100)
+                    duration = float(data.get("duration", 1.0))
+                    if action == "forward":
+                        agv.drive("FORWARD", spd)
+                    elif action == "forward_time":
+                        agv.drive_for("FORWARD", spd, duration)
+                    elif action == "backward":
+                        agv.drive("BACKWARD", spd)
+                    elif action == "backward_time":
+                        agv.drive_for("BACKWARD", spd, duration)
+                    elif action == "left":
+                        agv.turn("LEFT", spd)
+                    elif action == "left_time":
+                        agv.turn_for("LEFT", spd, duration)
+                    elif action == "right":
+                        agv.turn("RIGHT", spd)
+                    elif action == "right_time":
+                        agv.turn_for("RIGHT", spd, duration)
+                    elif action == "spin_left":
+                        agv.spin("LEFT", spd)
+                    elif action == "spin_left_time":
+                        agv.spin_for("LEFT", spd, duration)
+                    elif action == "spin_right":
+                        agv.spin("RIGHT", spd)
+                    elif action == "spin_right_time":
+                        agv.spin_for("RIGHT", spd, duration)
+                    elif action == "differential":
+                        left_spd = data.get("left_speed", spd)
+                        right_spd = data.get("right_speed", spd)
+                        agv.steer(left_spd, right_spd)
+                    elif action == "line_step":
+                        step_res = agv.line_track_step(spd)
+                        await websocket.send(json.dumps({"type": "line_step", "result": step_res}))
+                    elif action == "follow_line":
+                        cond = data.get("condition", "cross")
+                        timeout = float(data.get("timeout", 30.0))
+                        agv.follow_line_until(cond, spd, timeout)
+                    elif action in ("go", "go_xyz"):
+                        x = float(data.get("x", 0))
+                        y = float(data.get("y", 0))
+                        z = float(data.get("z", 0))
+                        agv.go(x, y, z, spd)
+                    elif action == "curve":
+                        x1 = float(data.get("x1", 0))
+                        y1 = float(data.get("y1", 0))
+                        z1 = float(data.get("z1", 0))
+                        x2 = float(data.get("x2", 0))
+                        y2 = float(data.get("y2", 0))
+                        z2 = float(data.get("z2", 0))
+                        agv.curve(x1, y1, z1, x2, y2, z2, spd)
+                    elif action == "move_distance":
+                        dir_m = data.get("dir", "FORWARD")
+                        dist = float(data.get("distance", 50))
+                        agv.move_distance(dir_m, dist, spd)
+                    elif action in ("rotate", "rotate_degree"):
+                        dir_r = data.get("dir", "cw")
+                        deg = float(data.get("degree", 90))
+                        agv.rotate(dir_r, deg, spd)
+                    elif action == "calibration_xy":
+                        sx = float(data.get("scale_x", 100))
+                        sy = float(data.get("scale_y", 100))
+                        agv.set_calibration_xy(sx, sy)
+                    elif action == "reset_coordinates":
+                        agv.reset_coordinates()
+                    elif action == "stop":
+                        agv.stop()
+                    continue
+
                 response = {"type": "ack", "command": data.get("command", "unknown"), "status": "error", "message": "Unknown command"}
                 await websocket.send(json.dumps(response))
 
@@ -552,12 +693,14 @@ async def start_server(host="0.0.0.0", port=9002):
     async with websockets.serve(handler, host, port, max_size=1_048_576):
         logging.info(f"server listening on {host}:{port}")
         adhoc_task = asyncio.create_task(adhoc_telemetry_loop())
+        agv_task = asyncio.create_task(agv_telemetry_loop())
         try:
             await asyncio.Future()  # Run forever
         finally:
             adhoc_task.cancel()
+            agv_task.cancel()
             try:
-                await asyncio.gather(adhoc_task, return_exceptions=True)
+                await asyncio.gather(adhoc_task, agv_task, return_exceptions=True)
             except Exception:
                 pass
             stop_all_workers()

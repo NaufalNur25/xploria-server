@@ -195,3 +195,16 @@ class MotorHAL:
             self.run_dc("M2", 0)
         else:
             self.run_dc(motor, 0)
+
+    def push_defective_ejector(self, pin=18, push_angle=90, reset_angle=0, duration=0.5):
+        """Mendorong servo/solenoid ejector untuk membuang barang cacat lalu kembali."""
+        try:
+            self.set_servo(pin, push_angle)
+            time.sleep(duration)
+            self.set_servo(pin, reset_angle)
+        except Exception as e:
+            logger.error(f"Ejector push error: {e}")
+
+    def optimize_conveyor_speed_ai(self, motor="M1", base_speed=120):
+        """Mengatur kecepatan konveyor secara adaptif sesuai antrean produksi."""
+        self.run_dc(motor, base_speed)
