@@ -146,18 +146,19 @@ def _resolve_serial_port():
 
 
 def _import_yolo():
-    """Import ultralytics YOLO, termasuk fallback ke virtualenv tim HW di ~/smartcity/smartcctv/pi."""
+    """Import ultralytics YOLO, memprioritaskan virtualenv tim HW di ~/smartcity/smartcctv/pi."""
+    import glob
+    import sys
+    for sp in sorted(glob.glob('/home/xploria/smartcity/smartcctv/pi/lib/python*/site-packages')):
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
     try:
         from ultralytics import YOLO
         return YOLO
-    except ImportError:
-        import glob
-        import sys
-        for sp in sorted(glob.glob('/home/xploria/smartcity/smartcctv/pi/lib/python*/site-packages')):
-            if sp not in sys.path:
-                sys.path.append(sp)
-        from ultralytics import YOLO
-        return YOLO
+    except Exception as e:
+        import logging
+        logging.warning("Gagal import YOLO: %s", e)
+        raise
 
 
 class CityCctvService:
@@ -223,8 +224,9 @@ class CityCctvService:
             self.engine = YOLO(str(self.model_path))
             self.engine_type = 'ultralytics'
             return self.engine
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.warning("Gagal load YOLO engine (%s): %s", self.model_path, e)
 
         # 2. Fallback ke OpenCV DNN jika file berupa .onnx murni
         if self.model_path.is_file() and self.model_path.suffix.lower() == '.onnx':
