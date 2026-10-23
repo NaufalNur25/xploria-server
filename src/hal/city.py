@@ -265,9 +265,19 @@ class CityCctvService:
             if frame is None:
                 raise ValueError("Gagal mendecode frame JPEG.")
 
-            # Jalur utama: Ultralytics YOLO NCNN (persis seperti tesuart_yolo.py)
+            # Jalur utama: Ultralytics YOLO NCNN (hanya mendeteksi mobil/kendaraan dan orang)
             if self.engine_type == 'ultralytics':
-                results = engine(frame, imgsz=320, conf=self.conf_threshold, verbose=False)
+                allowed_classes = VEHICLE_CLASSES | PERSON_CLASSES
+                target_cls_ids = [
+                    cid for cid, cname in engine.names.items()
+                    if str(cname).lower() in allowed_classes
+                ] if hasattr(engine, 'names') and isinstance(engine.names, dict) else None
+
+                kwargs = dict(imgsz=320, conf=self.conf_threshold, verbose=False)
+                if target_cls_ids:
+                    kwargs['classes'] = target_cls_ids
+
+                results = engine(frame, **kwargs)
                 detections = results[0].boxes
                 cars_count = 0
                 persons_count = 0
