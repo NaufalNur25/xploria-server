@@ -11,8 +11,27 @@ balasan `FACE` + panjang JPEG 4 byte little-endian + JPEG. Firmware contoh `XPLC
 terdahulu tidak digunakan untuk konfigurasi ini dan tidak perlu di-upload.
 
 Foto JPEG tidak disimpan permanen secara otomatis. NPZ berisi embedding, bukan kumpulan JPEG.
-Versi awal mendukung satu kamera, satu sampel per nama, tepat satu wajah per foto.
-Nama sensitif huruf besar/kecil. Daftar ulang nama yang sama mengganti sampelnya.
+Implementasi mendukung satu kamera, hingga lima sampel per nama, tepat satu wajah per foto.
+Nama sensitif huruf besar/kecil. Daftar ulang nama yang sama menambah sampel hingga batas lima. Dataset schema 1 lama tetap terbaca dan sampel lama tetap disimpan.
+Balasan pendaftaran menambahkan sample_count, max_samples, dan sample_added. Jika sudah lima, sample_added bernilai false dan dataset tidak diubah.
+Balasan pengenalan tetap memakai similarity (cosine), recognized, dan name; ditambah candidate_name, threshold, dan sample_count milik kandidat. name tetap kosong bila tidak dikenali. Skor maksimum dihitung dari seluruh sampel, termasuk data legacy bila dikonfigurasi.
+Flutter menampilkan clamp(similarity, 0, 1) * 100 sebagai skor kemiripan, bukan probabilitas identitas. Daftar dan Kenali tetap mengambil satu foto baru per permintaan. Hapus tetap menghapus seluruh faces.npz aplikasi; model dan NPZ legacy tidak dihapus.
+
+## Ambang kemiripan dari Blockly
+
+Blok `Kenali wajah jika skor minimal <angka>%` menghasilkan `face.is_recognized_at_least(angka)`. Fungsi memvalidasi angka 0–100, mengambil satu foto, lalu membandingkan skor cosine dengan angka/100 untuk pemeriksaan itu saja. Nilai `XPLORIA_FACE_THRESHOLD` global tidak diubah; blok lama `face.is_recognized()` tetap menggunakan batas global. Hasil `camera_result` memuat threshold yang benar untuk pemindaian tersebut.
+
+Blok `Skor kemiripan wajah terakhir (%)` memanggil `face.get_last_similarity_percent()`, yang membaca hasil pemindaian terakhir pada konteks program yang sama tanpa memotret ulang. Nama juga dibaca dari hasil yang sama melalui `face.get_recognized_name()`. Skor bernilai 0 bila belum ada hasil pengenalan atau wajah tidak terdeteksi. Pembacaan skor/nama sebelum kondisi kenali belum memberikan data pemindaian baru. Skor 70% adalah skor cosine 0,70, bukan probabilitas identitas 70%.
+
+Contoh Blockly secara konseptual:
+
+```python
+from xploria_hal import face
+
+if face.is_recognized_at_least(70):
+    print(face.get_recognized_name())
+    print(face.get_last_similarity_percent())
+```
 Tidak ada liveness detection; ini fitur pembelajaran, belum cocok menjadi autentikasi pintu sungguhan.
 
 ## File
@@ -29,16 +48,27 @@ Pemisahan resource lintas Smart belum ditambahkan.
 
 ## Pasang di Pi
 
-Sesuaikan path checkout jika instalasi berbeda. Perintah ini dijalankan di SSH Pi, bukan CMD Windows.
+Pada instalasi tim ini, Git checkout berada di `~/xploria-server`, sedangkan daemon
+menjalankan salinan yang dipasang di `/opt/xploria`. Pastikan `git pull` di checkout
+**sudah berhasil** sebelum menjalankan installer. Jika Git melaporkan divergent
+branches, selesaikan commit lokal terlebih dahulu; installer tidak memperbaiki Git.
+
+Perintah ini dijalankan di SSH Pi, bukan CMD Windows:
 
 ```bash
-cd /home/xploria/xploria-server
-sudo -u xploria .venv/bin/python3 -m pip install -r requirements-face.txt
+cd ~/xploria-server
+sudo APP_USER=xploria APP_DIR=/opt/xploria ./install.sh
+sudo -u xploria /opt/xploria/.venv/bin/python3 -m pip install -r /opt/xploria/requirements-face.txt
 sudo install -d -o xploria -g xploria -m 700 /var/lib/xploria/faces
 sudo usermod -aG dialout xploria
 sudo install -d /etc/xploria
-sudo cp face.env.example /etc/xploria/face.env
+sudo cp -n /opt/xploria/face.env.example /etc/xploria/face.env
 ```
+
+`install.sh` memakai `rsync --delete` menuju `/opt/xploria`; simpan model dan NPZ
+di luar folder itu, misalnya `/var/lib/xploria/faces` dan folder tim HW tersendiri.
+Installer mempertahankan `pin_config.db`, tetapi tidak melindungi file wajah yang
+disimpan sembarang di `/opt/xploria`.
 
 Tim HW menguji `face_detection_yunet_2026may.onnx` dan
 `face_recognition_sface_2021dec_int8.onnx`. Jika ingin memakai NPZ lama dari tim,

@@ -38,29 +38,11 @@ def check_stop():
         raise RuntimeError('Operasi CCTV dibatalkan.')
 
 
-def read_frame(port, timeout=12):
-    """Team HW UART protocol: FRAME <size>\\n + raw JPEG bytes."""
-    deadline = time.monotonic() + timeout
-
-    def exact(size):
-        result = bytearray()
-        while len(result) < size:
-            check_stop()
-            if time.monotonic() >= deadline:
-                raise TimeoutError('Kamera UART tidak mengirim foto lengkap.')
-            chunk = port.read(size - len(result))
-            if chunk:
-                result.extend(chunk)
-            else:
-                time.sleep(0.01)
-        return bytes(result)
-
-    # Baca baris header "FRAME <size>\\n"
+def _read_header_line(port, deadline):
+    """Baca satu baris header ('FRAME <size>' atau 'JPEG:<size>') sampai deadline."""
     line_buf = bytearray()
-    while True:
+    while time.monotonic() < deadline:
         check_stop()
-        if time.monotonic() >= deadline:
-            raise TimeoutError('Kamera UART timeout saat menunggu header FRAME.')
         b = port.read(1)
         if not b:
             time.sleep(0.005)
@@ -70,14 +52,54 @@ def read_frame(port, timeout=12):
             line_str = line_buf.decode('ascii', errors='ignore').strip()
             if line_str.startswith('FRAME '):
                 try:
-                    size = int(line_str.split()[1])
-                    break
+                    return int(line_str.split()[1])
+                except (IndexError, ValueError):
+                    line_buf.clear()
+            elif line_str.startswith('JPEG:'):
+                try:
+                    return int(line_str.split(':', 1)[1])
                 except (IndexError, ValueError):
                     line_buf.clear()
             elif line_str.startswith('ERROR'):
                 raise RuntimeError(f'ESP32-CAM melaporkan kesalahan: {line_str}')
             else:
                 line_buf.clear()
+    return None
+
+
+def read_frame(port, timeout=12, allow_legacy_fallback=False):
+    """Membaca paket JPEG dari UART ESP32-CAM.
+
+    Mendukung 2 protokol firmware tim HW:
+    1. Protokol baru:  GET\\n -> FRAME <size>\\n + raw JPEG
+    2. Protokol lama:  C     -> JPEG:<size>\\n  + raw JPEG (tesuart_yolo.py)
+    """
+    deadline = time.monotonic() + timeout
+
+    def exact(size):
+        result = bytearray()
+        while len(result) < size:
+            check_stop()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Kamera UART tidak mengirim foto lengkap.')
+            chunk = port.read(min(4096, size - len(result)))
+            if chunk:
+                result.extend(chunk)
+            else:
+                time.sleep(0.01)
+        return bytes(result)
+
+    first_wait = min(2.0, timeout * 0.4) if allow_legacy_fallback else timeout
+    size = _read_header_line(port, time.monotonic() + first_wait)
+
+    if size is None and allow_legacy_fallback:
+        # Fallback otomatis ke protokol lama ('C' -> 'JPEG:<size>')
+        port.write(b'C')
+        port.flush()
+        size = _read_header_line(port, deadline)
+
+    if size is None:
+        raise TimeoutError('Kamera UART timeout saat menunggu header FRAME/JPEG.')
 
     if not 4 <= size <= 1_048_576:
         raise ValueError(f'Ukuran JPEG kamera tidak valid ({size} bytes).')
@@ -88,16 +110,68 @@ def read_frame(port, timeout=12):
     return jpeg
 
 
+DEFAULT_MODEL_CANDIDATES = (
+    '/var/lib/xploria/models/yolo26n_ncnn_model',
+    '/var/lib/xploria/models/yolo26n_ncnn_640',
+    '/var/lib/xploria/models/yolo26n.pt',
+    '/var/lib/xploria/models/yolov8n.onnx',
+    '/home/xploria/smartcity/smartcctv/yolo26n_ncnn_model',
+    '/home/xploria/smartcity/smartcctv/yolo26n_ncnn_640',
+    '/home/xploria/smartcity/smartcctv/yolo26n.pt',
+)
+
+VEHICLE_CLASSES = {'car', 'bus', 'truck', 'motorcycle'}
+PERSON_CLASSES = {'person'}
+
+
+def _resolve_model_path():
+    env_path = os.environ.get('XPLORIA_CCTV_MODEL')
+    if env_path:
+        return Path(env_path)
+    for candidate in DEFAULT_MODEL_CANDIDATES:
+        p = Path(candidate)
+        if p.exists():
+            return p
+    return Path(DEFAULT_MODEL_CANDIDATES[0])
+
+
+def _resolve_serial_port():
+    env_port = os.environ.get('XPLORIA_CAMERA_PORT')
+    if env_port and os.path.exists(env_port):
+        return env_port
+    for candidate in ('/dev/serial0', '/dev/ttyUSB0', '/dev/ttyAMA0'):
+        if os.path.exists(candidate):
+            return candidate
+    return env_port or '/dev/serial0'
+
+
+def _import_yolo():
+    """Import ultralytics YOLO, termasuk fallback ke virtualenv tim HW di ~/smartcity/smartcctv/pi."""
+    try:
+        from ultralytics import YOLO
+        return YOLO
+    except ImportError:
+        import glob
+        import sys
+        for sp in sorted(glob.glob('/home/xploria/smartcity/smartcctv/pi/lib/python*/site-packages')):
+            if sp not in sys.path:
+                sys.path.append(sp)
+        from ultralytics import YOLO
+        return YOLO
+
+
 class CityCctvService:
     def __init__(self):
         self.vehicle_count = 0
         self.engine = None
-        self.model_path = Path(os.environ.get('XPLORIA_CCTV_MODEL', '/var/lib/xploria/models/yolov8n.onnx'))
+        self.engine_type = None  # 'ultralytics' atau 'opencv_onnx'
+        self.model_path = _resolve_model_path()
+        self.conf_threshold = float(os.environ.get('XPLORIA_CCTV_CONF', '0.35'))
         self.last_result = None
 
     def capture(self):
         check_stop()
-        port_name = os.environ.get('XPLORIA_CAMERA_PORT', '/dev/serial0')
+        port_name = _resolve_serial_port()
         baud_rate = int(os.environ.get('XPLORIA_CAMERA_BAUD', '460800'))
 
         # Fallback Mock jika mode mock aktif atau port tidak tersedia
@@ -106,15 +180,15 @@ class CityCctvService:
 
         import serial
         with serial.Serial(port_name, baud_rate, timeout=0.1, write_timeout=2, exclusive=True) as port:
-            time.sleep(0.2)
+            time.sleep(0.1)
             port.reset_input_buffer()
             port.write(b'GET\n')
             port.flush()
-            return read_frame(port)
+            return read_frame(port, allow_legacy_fallback=True)
 
     def ping(self):
         check_stop()
-        port_name = os.environ.get('XPLORIA_CAMERA_PORT', '/dev/serial0')
+        port_name = _resolve_serial_port()
         baud_rate = int(os.environ.get('XPLORIA_CAMERA_BAUD', '460800'))
 
         if os.environ.get('XPLORIA_MOCK_CAMERA') == '1' or not os.path.exists(port_name):
@@ -139,24 +213,38 @@ class CityCctvService:
     def load_engine(self):
         if self.engine is not None:
             return self.engine
-        if not self.model_path.is_file():
-            # Model file belum tersedia; gunakan mock AI detector
+        self.model_path = _resolve_model_path()
+        if not self.model_path.exists():
             return None
+
+        # 1. Prioritaskan Ultralytics YOLO (mendukung folder NCNN yolo26n_ncnn_model, .pt, dan .onnx)
         try:
-            import cv2
-            net = cv2.dnn.readNetFromONNX(str(self.model_path))
-            self.engine = net
+            YOLO = _import_yolo()
+            self.engine = YOLO(str(self.model_path))
+            self.engine_type = 'ultralytics'
             return self.engine
         except Exception:
-            return None
+            pass
+
+        # 2. Fallback ke OpenCV DNN jika file berupa .onnx murni
+        if self.model_path.is_file() and self.model_path.suffix.lower() == '.onnx':
+            try:
+                import cv2
+                net = cv2.dnn.readNetFromONNX(str(self.model_path))
+                self.engine = net
+                self.engine_type = 'opencv_onnx'
+                return self.engine
+            except Exception:
+                pass
+
+        return None
 
     def detect_vehicle(self, jpeg_bytes):
-        """Menganalisis frame JPEG untuk menentukan apakah ada mobil ('CAR') atau kosong ('EMPTY')."""
+        """Menganalisis frame JPEG menggunakan model YOLO NCNN tim HW (tesuart_yolo.py)."""
         check_stop()
-        net = self.load_engine()
+        engine = self.load_engine()
 
-        # Jika model ONNX belum tersedia, gunakan analisa pixel / mock cerdas
-        if net is None:
+        if engine is None:
             return self._mock_detect(jpeg_bytes)
 
         try:
@@ -168,20 +256,71 @@ class CityCctvService:
             if frame is None:
                 raise ValueError("Gagal mendecode frame JPEG.")
 
-            h, w = frame.shape[:2]
-            # YOLOv8 input blob: 640x640 (normalized 1/255.0)
-            blob = cv2.dnn.blobFromImage(frame, 1 / 255.0, (640, 640), swapRB=True, crop=False)
-            net.setInput(blob)
-            outputs = net.forward()
+            # Jalur utama: Ultralytics YOLO NCNN (persis seperti tesuart_yolo.py)
+            if self.engine_type == 'ultralytics':
+                results = engine(frame, imgsz=320, conf=self.conf_threshold, verbose=False)
+                detections = results[0].boxes
+                cars_count = 0
+                persons_count = 0
+                best_conf = 0.0
+                best_label = 'Empty'
 
-            # Format YOLOv8 output: [1, 84, 8400]
-            # 84 = [x, y, w, h] + 80 class scores
-            # Kelas kendaraan COCO: 2 (car), 3 (motorcycle), 5 (bus), 7 (truck)
+                for box in detections:
+                    cls_id = int(box.cls[0])
+                    conf = float(box.conf[0]) if hasattr(box, 'conf') else self.conf_threshold
+                    label_name = str(engine.names[cls_id])
+                    label_lower = label_name.lower()
+
+                    if label_lower in VEHICLE_CLASSES:
+                        cars_count += 1
+                        if conf >= best_conf:
+                            best_conf = conf
+                            best_label = label_name.capitalize()
+                    elif label_lower in PERSON_CLASSES:
+                        persons_count += 1
+
+                is_car = cars_count > 0
+                if cars_count == 0 and persons_count == 0:
+                    status_jalan = "JALANAN KOSONG"
+                else:
+                    rincian = []
+                    if cars_count > 0:
+                        rincian.append(f"{cars_count} Kendaraan/Mobil")
+                    if persons_count > 0:
+                        rincian.append(f"{persons_count} Orang")
+                    status_jalan = f"TERDETEKSI: {', '.join(rincian)}"
+
+                annotated_frame = results[0].plot()
+                cv2.putText(
+                    annotated_frame,
+                    status_jalan,
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0) if not is_car else (0, 0, 255),
+                    2,
+                )
+                _, annotated = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                return {
+                    'status': 'CAR' if is_car else 'EMPTY',
+                    'is_car': is_car,
+                    'cars_count': cars_count,
+                    'persons_count': persons_count,
+                    'confidence': round(best_conf, 2) if is_car else 0.0,
+                    'label': best_label if is_car else 'Empty',
+                    'jpeg_bytes': annotated.tobytes(),
+                }
+
+            # Jalur cadangan: OpenCV DNN ONNX
+            h, w = frame.shape[:2]
+            blob = cv2.dnn.blobFromImage(frame, 1 / 255.0, (640, 640), swapRB=True, crop=False)
+            engine.setInput(blob)
+            outputs = engine.forward()
+
             vehicle_classes = {2: 'Car', 3: 'Motorcycle', 5: 'Bus', 7: 'Truck'}
-            
             output = outputs[0]
             if output.shape[0] == 84:
-                output = output.T  # Transpose ke [8400, 84]
+                output = output.T
 
             boxes = []
             confidences = []
@@ -191,7 +330,7 @@ class CityCctvService:
                 classes_scores = row[4:]
                 max_score_idx = int(np.argmax(classes_scores))
                 confidence = float(classes_scores[max_score_idx])
-                if confidence >= 0.40 and max_score_idx in vehicle_classes:
+                if confidence >= self.conf_threshold and max_score_idx in vehicle_classes:
                     cx, cy, bw, bh = row[0:4]
                     left = int((cx - bw / 2) * (w / 640.0))
                     top = int((cy - bh / 2) * (h / 640.0))
@@ -201,15 +340,14 @@ class CityCctvService:
                     confidences.append(confidence)
                     class_ids.append(max_score_idx)
 
-            indices = cv2.dnn.NMSBoxes(boxes, confidences, 0.40, 0.45)
-            
+            indices = cv2.dnn.NMSBoxes(boxes, confidences, self.conf_threshold, 0.45)
+
             if len(indices) > 0:
                 best_idx = indices[0] if isinstance(indices[0], int) else indices[0][0]
                 box = boxes[best_idx]
                 score = confidences[best_idx]
                 label_name = vehicle_classes.get(class_ids[best_idx], 'Car')
 
-                # Gambar kotak hijau dan teks di frame
                 cv2.rectangle(frame, (box[0], box[1]), (box[0] + box[2], box[1] + box[3]), (0, 255, 0), 2)
                 cv2.putText(frame, f"{label_name} {int(score * 100)}%", (box[0], max(20, box[1] - 8)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
@@ -219,20 +357,21 @@ class CityCctvService:
                 return {
                     'status': 'CAR',
                     'is_car': True,
+                    'cars_count': len(indices),
                     'confidence': round(score, 2),
                     'label': label_name,
                     'jpeg_bytes': annotated_bytes
                 }
             else:
-                # Tidak ada kendaraan terdeteksi (Jalan Kosong)
-                cv2.putText(frame, "EMPTY ROAD", (20, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+                cv2.putText(frame, "JALANAN KOSONG", (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 _, annotated = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 annotated_bytes = annotated.tobytes()
 
                 return {
                     'status': 'EMPTY',
                     'is_car': False,
+                    'cars_count': 0,
                     'confidence': 0.0,
                     'label': 'Empty',
                     'jpeg_bytes': annotated_bytes

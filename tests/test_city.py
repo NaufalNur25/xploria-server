@@ -17,6 +17,10 @@ class CityTests(unittest.TestCase):
         packet = b'boot log\nFRAME ' + str(len(jpeg)).encode('ascii') + b'\n' + jpeg
         self.assertEqual(city.read_frame(io.BytesIO(packet)), jpeg)
 
+        # Also support legacy tesuart_yolo.py header 'JPEG:<size>'
+        legacy_packet = b'JPEG:' + str(len(jpeg)).encode('ascii') + b'\n' + jpeg
+        self.assertEqual(city.read_frame(io.BytesIO(legacy_packet)), jpeg)
+
         # Corrupted JPEG end
         bad_jpeg = b'\xff\xd8fake_jpeg_content\xff\x00'
         bad_packet = b'FRAME ' + str(len(bad_jpeg)).encode('ascii') + b'\n' + bad_jpeg
