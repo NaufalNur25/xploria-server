@@ -484,6 +484,8 @@ class CityCctvService:
                 'confidence': det['confidence'],
                 'label': det['label'],
                 'count': self.vehicle_count,
+                'cars_count': det.get('cars_count', 0),
+                'persons_count': det.get('persons_count', 0),
                 'jpeg_base64': jpeg_b64,
                 'message': 'Mobil Terdeteksi!' if det['is_car'] else 'Jalanan Kosong (Tidak Ada Mobil).'
             }
