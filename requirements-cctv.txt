@@ -1,0 +1,5 @@
+# Optional: install in the daemon virtualenv when using the Smart CCTV / Vehicle Counter AI.
+pyserial>=3.5,<4
+numpy>=1.24,<3
+opencv-python-headless>=4.8,<5
+ultralytics>=8.0.0

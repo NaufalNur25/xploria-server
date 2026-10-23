@@ -9,6 +9,7 @@ from .rgb import RGBHAL
 from .hospital import HospitalHAL
 from .mocks import DisplayHAL, MotionHAL, LANHAL, AIHAL, PowerHAL
 from .audio import AudioHAL
+from .agri import AgriHAL
 from . import voice
 
 pin       = PinHAL()
@@ -27,3 +28,4 @@ display   = DisplayHAL()
 motion    = MotionHAL()
 lan       = LANHAL()
 ai        = AIHAL()
+agri      = AgriHAL(sensor=sensor, motor=motor, pin=pin)

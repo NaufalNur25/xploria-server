@@ -1,8 +1,13 @@
 import asyncio
+import base64
+import os
 import json
 import logging
+import re
+import builtins
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import websockets
 import traceback
@@ -10,7 +15,7 @@ import threading
 
 from hal.hospital_widgets import HospitalWidgetSession
 
-from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice
+from hal import sensor, motor, led, rgb, ledstrip, power, rfid, telemetry, pin, audio, display, motion, lan, ai, hospital, voice, agri
 from hal.sensor import stop_all_workers
 from hal import face, city
 
@@ -47,6 +52,7 @@ global_proxies = {
     "lan": HalProxy(lan),
     "ai": HalProxy(ai),
     "hospital": HalProxy(hospital),
+    "agri": HalProxy(agri),
     "voice": HalProxy(voice),
     "face": HalProxy(face),
     "city": HalProxy(city)
@@ -75,6 +81,64 @@ def stop_execution_global(target):
 
 # Simpan referensi ke running event loop agar thread bisa mengirim ke queue dengan aman
 _main_loop: asyncio.AbstractEventLoop = None
+
+# Pool khusus program pengguna: terpisah dari default executor asyncio sehingga
+# program yang macet tidak menghalangi asyncio.to_thread milik bagian lain
+# (mis. kontrol servo) dan jumlah program serentak dibatasi.
+USER_EXECUTOR_WORKERS = 4
+_user_executor = None
+_user_executor_lock = threading.Lock()
+
+# --- Batas unggah audio rekaman siswa (Pi 3B, multi-client) ---
+# Frame WebSocket dibatasi 1 MiB (max_size di start_server); base64 menggembung 4/3,
+# sehingga payload audio maksimum praktis ~768 KB. Gerbang di sini lebih ketat (~512 KB
+# audio = ~16 detik PCM 16kHz mono) dan dicek SEBELUM decode.
+MAX_UPLOAD_B64_CHARS = 700_000
+# Hanya 1 upload diproses serentak di seluruh klien; sisanya antre tanpa memblokir event loop.
+_audio_upload_semaphore: "asyncio.Semaphore" = None
+
+
+def _store_uploaded_audio(slot: str, base64_data: str):
+    """Jalan di worker thread: decode base64, lewati penulisan bila isi identik.
+
+    Mengembalikan (path, changed). Dedupe mencegah tulis ulang + churn LRU ketika
+    banyak klien/penekanan 'Run' berulang mengirim rekaman yang sama.
+    """
+    audio_bytes = base64.b64decode(base64_data.strip())
+    existing = audio._resolve_custom_path(slot)
+    try:
+        if os.path.exists(existing) and os.path.getsize(existing) == len(audio_bytes):
+            with open(existing, "rb") as f:
+                if f.read() == audio_bytes:
+                    return str(existing), False
+    except OSError:
+        pass
+    return str(audio.save_custom_audio(slot, audio_bytes)), True
+
+
+def get_user_executor():
+    global _user_executor
+    with _user_executor_lock:
+        if _user_executor is None:
+            _user_executor = ThreadPoolExecutor(
+                max_workers=USER_EXECUTOR_WORKERS,
+                thread_name_prefix="xploria-user",
+            )
+        return _user_executor
+
+
+def shutdown_user_executor():
+    """Hentikan semua program pengguna lalu tutup pool tanpa menunggu thread macet."""
+    global _user_executor, _global_primary_execution, _global_telemetry_execution
+    with _global_execution_lock:
+        stop_execution_global(_global_primary_execution)
+        stop_execution_global(_global_telemetry_execution)
+        _global_primary_execution = None
+        _global_telemetry_execution = None
+    with _user_executor_lock:
+        executor, _user_executor = _user_executor, None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 async def adhoc_telemetry_loop():
@@ -112,15 +176,33 @@ def reject_json_constant(value):
     raise ValueError("Angka JSON tidak valid: " + value)
 
 
+def unescape_single_line_code(code_str):
+    """Kode lama dikirim sebagai satu baris dengan '\\n' literal.
+
+    Hanya kode satu baris yang di-unescape. Kode multi-baris sudah benar, dan
+    '\\n' di dalam string-nya (mis. split('\\n')) tidak boleh diubah menjadi
+    baris baru karena merusak literal string.
+    """
+    if not isinstance(code_str, str) or "\n" in code_str:
+        return code_str
+    return (code_str.replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\t", "\t"))
+
+
+def _release_global_execution(stop_event):
+    """Kosongkan pelacak global hanya bila masih milik eksekusi ini."""
+    global _global_primary_execution, _global_telemetry_execution
+    with _global_execution_lock:
+        if _global_primary_execution and _global_primary_execution["stop"] is stop_event:
+            _global_primary_execution = None
+        if _global_telemetry_execution and _global_telemetry_execution["stop"] is stop_event:
+            _global_telemetry_execution = None
+
+
 def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_session=None):
     """Mengeksekusi raw Python code dan menangkap outputnya (streaming)."""
-    if isinstance(code_str, str):
-        if "\\n" in code_str:
-            code_str = code_str.replace("\\n", "\n")
-        if "\\r" in code_str:
-            code_str = code_str.replace("\\r", "\r")
-        if "\\t" in code_str:
-            code_str = code_str.replace("\\t", "\t")
+    code_str = unescape_single_line_code(code_str)
 
     stop_event = stop_event or threading.Event()
 
@@ -171,7 +253,7 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
     except ImportError: adafruit_dht = None
 
     exec_globals = {
-        "__builtins__": __builtins__,
+        "__builtins__": None,
         **local_proxies,
         "time": custom_time,
         "math": __import__("math"),
@@ -184,6 +266,28 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
     if widget_session is not None:
         widget_session._sleep = custom_sleep
         exec_globals["hospital"] = HalProxy(widget_session, check_stop)
+
+    # 'import time' / 'from xploria_hal import ...' di dalam program siswa
+    # biasanya melewati nama global di atas dan mengambil modul asli dari
+    # sys.modules (tanpa pemeriksaan stop). __import__ lokal ini mengarahkan
+    # keduanya ke versi per-eksekusi sehingga loop bisa dihentikan.
+    local_hal_module = types.ModuleType("xploria_hal")
+    for name, proxy in local_proxies.items():
+        setattr(local_hal_module, name, exec_globals.get(name, proxy))
+
+    real_import = builtins.__import__
+
+    def local_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if level == 0:
+            if name == "xploria_hal":
+                return local_hal_module
+            if name == "time":
+                return custom_time
+        return real_import(name, globals, locals, fromlist, level)
+
+    local_builtins = dict(vars(builtins))
+    local_builtins["__import__"] = local_import
+    exec_globals["__builtins__"] = local_builtins
 
     try:
         check_stop()
@@ -204,6 +308,10 @@ def execute_python_code(code_str, client_ws, loop, stop_event=None, widget_sessi
     finally:
         if widget_session is not None:
             widget_session.close()
+        _release_global_execution(stop_event)
+        # Putuskan referensi (proxy HAL, widget_session, closure) agar tidak
+        # tertahan setelah program selesai.
+        exec_globals.clear()
 
 
 async def handler(websocket):
@@ -255,7 +363,11 @@ async def handler(websocket):
 
     async def run_in_background(code, target):
         try:
-            response = await asyncio.to_thread(execute_python_code, code, websocket, asyncio.get_running_loop(), target["stop"], target["runtime"])
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                get_user_executor(), execute_python_code,
+                code, websocket, loop, target["stop"], target["runtime"],
+            )
             await websocket.send(json.dumps(response))
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -337,6 +449,47 @@ async def handler(websocket):
                 cmd = data.get("command")
                 msg_type = data.get("type")
 
+                if msg_type == "upload_audio":
+                    slot = str(data.get("slot", "slot_1")).lower().strip()
+                    base64_data = data.get("data", "")
+                    if not isinstance(base64_data, str):
+                        base64_data = ""
+                    if "," in base64_data[:128]:
+                        base64_data = base64_data.split(",", 1)[1]
+                    base64_data = base64_data.strip()
+                    try:
+                        if not re.match(r"^[a-zA-Z0-9_\-]+$", slot):
+                            raise ValueError(f"Nama slot '{slot}' tidak valid. Hanya alfanumerik, underscore, dan dash yang diizinkan.")
+                        # Gerbang murah SEBELUM decode: tolak payload raksasa tanpa memakan CPU/RAM.
+                        if len(base64_data) > MAX_UPLOAD_B64_CHARS:
+                            raise ValueError("Ukuran audio melebihi batas unggah.")
+                        # Decode + tulis file di worker thread (bukan event loop) dan dibatasi
+                        # 1 upload serentak agar multi-client tidak membuat telemetry/servo lag.
+                        async with _audio_upload_semaphore:
+                            saved_path, changed = await asyncio.to_thread(
+                                _store_uploaded_audio, slot, base64_data
+                            )
+                        logging.info(f"[AudioWS] Upload slot '{slot}' berhasil: {saved_path} (changed={changed}, clients={len(connected_clients)})")
+                        response = {
+                            "type": "audio_upload_result",
+                            "slot": slot,
+                            "status": "ok",
+                            "unchanged": not changed,
+                            "client_count": len(connected_clients),
+                            "message": f"Audio {slot} {'berhasil disimpan' if changed else 'sudah up-to-date'}",
+                            "path": saved_path,
+                        }
+                    except Exception as e:
+                        logging.error(f"[AudioWS] Gagal memproses upload slot '{slot}': {e}")
+                        response = {
+                            "type": "audio_upload_result",
+                            "slot": slot,
+                            "status": "error",
+                            "message": f"Gagal menyimpan audio: {e}",
+                        }
+                    await websocket.send(json.dumps(response))
+                    continue
+
                 if msg_type == "voice_command":
                     request_id = data.get("request_id")
                     if data.get("is_final") is False:
@@ -375,7 +528,30 @@ async def handler(websocket):
                     await websocket.send(json.dumps(response))
                     continue
 
-                if msg_type == "control" and data.get("hw_type") == "esp32_cam":
+                if msg_type == "control" and (
+                    data.get("hw_type") in ("cctv_cam", "esp32_cctv", "vehicle_counter")
+                    or (data.get("command") in city.COMMANDS)
+                ):
+                    if not isinstance(data.get("request_id"), str) or not data["request_id"]:
+                        raise ValueError("request_id cctv diperlukan.")
+                    if data.get("command") not in city.COMMANDS:
+                        await websocket.send(json.dumps({"type": "cctv_result",
+                            "request_id": data["request_id"], "status": "error",
+                            "message": f"Perintah cctv tidak didukung: {data.get('command')}"}))
+                        continue
+                    if camera_stop is not None and not camera_stop.is_set():
+                        await websocket.send(json.dumps({"type": "cctv_result",
+                            "request_id": data["request_id"], "status": "error",
+                            "message": "Kamera sedang digunakan."}))
+                        continue
+                    camera_stop = threading.Event()
+                    task = asyncio.create_task(cctv_job(dict(data), camera_stop))
+                    task.add_done_callback(lambda _, event=camera_stop: event.set())
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    continue
+
+                if msg_type == "control" and (data.get("hw_type") == "esp32_cam" or data.get("command") in face.COMMANDS):
                     if not isinstance(data.get("request_id"), str) or not data["request_id"]:
                         raise ValueError("request_id kamera diperlukan.")
                     if data.get("command") not in face.COMMANDS:
@@ -395,25 +571,47 @@ async def handler(websocket):
                     task.add_done_callback(tasks.discard)
                     continue
 
-                if msg_type == "control" and data.get("hw_type") in ("cctv_cam", "esp32_cctv", "vehicle_counter"):
-                    if not isinstance(data.get("request_id"), str) or not data["request_id"]:
-                        raise ValueError("request_id cctv diperlukan.")
-                    if data.get("command") not in city.COMMANDS:
-                        await websocket.send(json.dumps({"type": "cctv_result",
-                            "request_id": data["request_id"], "status": "error",
-                            "message": f"Perintah cctv tidak didukung: {data.get('command')}"}))
-                        continue
-                    if camera_stop is not None and not camera_stop.is_set():
-                        await websocket.send(json.dumps({"type": "cctv_result",
-                            "request_id": data["request_id"], "status": "error",
-                            "message": "Kamera sedang digunakan."}))
-                        continue
-                    camera_stop = threading.Event()
-                    task = asyncio.create_task(cctv_job(dict(data), camera_stop))
-                    task.add_done_callback(lambda _, event=camera_stop: event.set())
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
+                if msg_type == "control" and data.get("pin") in (
+                    "sa_table_record",
+                    "sa_table_seed",
+                    "sa_table_clear",
+                    "sa_ai_analyze",
+                ):
+                    pin_name = str(data.get("pin"))
+                    value = data.get("value")
+                    if pin_name == "sa_table_record":
+                        await asyncio.to_thread(agri.table_record)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                        }
+                    elif pin_name == "sa_table_seed":
+                        seed_target = str(value or "moisture")
+                        await asyncio.to_thread(agri.table_seed, seed_target)
+                        ai_res = await asyncio.to_thread(agri.ai_state, seed_target)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                            "ai_result": ai_res,
+                        }
+                    elif pin_name == "sa_table_clear":
+                        await asyncio.to_thread(agri.table_clear)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                        }
+                    else:
+                        ai_target = str(value or "moisture_forecast")
+                        ai_res = await asyncio.to_thread(agri.ai_analyze, ai_target)
+                        telemetry_payload = {
+                            "dataset_rows": agri.dataset_rows(),
+                            "ai_result": ai_res,
+                        }
+                    await websocket.send(json.dumps({
+                        "type": "telemetry",
+                        "telemetry": telemetry_payload,
+                    }))
                     continue
+
+
+
 
                 # Metadata v2 pilot: only the Smart Home door-lock servo is
                 # accepted here. Other actuators keep using their legacy path
@@ -498,6 +696,7 @@ async def handler(websocket):
                             stop_execution_global(_global_primary_execution)
                             _global_primary_execution = None
                             voice.clear()
+                            audio.stop()
                     response = {"type": "ack", "command": "stop", "status": "ok", "message": "Stop signal sent"}
                     await websocket.send(json.dumps(response))
                     continue
@@ -574,8 +773,9 @@ async def handler(websocket):
 
 
 async def start_server(host="0.0.0.0", port=9002):
-    global _main_loop
+    global _main_loop, _audio_upload_semaphore
     _main_loop = asyncio.get_running_loop()
+    _audio_upload_semaphore = asyncio.Semaphore(1)
     telemetry._ensure_queue()
     telemetry._loop = _main_loop  # Simpan loop reference untuk thread-safe queue access
 
@@ -593,4 +793,6 @@ async def start_server(host="0.0.0.0", port=9002):
                 await asyncio.gather(adhoc_task, return_exceptions=True)
             except Exception:
                 pass
+            shutdown_user_executor()
             stop_all_workers()
+            agri.stop_all()
