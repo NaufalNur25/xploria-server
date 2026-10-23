@@ -126,7 +126,7 @@ PERSON_CLASSES = {'person'}
 
 def _resolve_model_path():
     env_path = os.environ.get('XPLORIA_CCTV_MODEL')
-    if env_path:
+    if env_path and Path(env_path).exists():
         return Path(env_path)
     for candidate in DEFAULT_MODEL_CANDIDATES:
         p = Path(candidate)
@@ -385,7 +385,9 @@ class CityCctvService:
                     'label': 'Empty',
                     'jpeg_bytes': annotated_bytes
                 }
-        except Exception:
+        except Exception as e:
+            import logging, traceback
+            logging.warning("Error dalam YOLO detect_vehicle: %s\n%s", e, traceback.format_exc())
             return self._mock_detect(jpeg_bytes)
 
     def _mock_detect(self, jpeg_bytes):
