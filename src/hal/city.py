@@ -120,7 +120,7 @@ DEFAULT_MODEL_CANDIDATES = (
     '/home/xploria/smartcity/smartcctv/yolo26n.pt',
 )
 
-VEHICLE_CLASSES = {'car', 'bus', 'truck', 'motorcycle'}
+VEHICLE_CLASSES = {'car'}
 PERSON_CLASSES = {'person'}
 
 
@@ -336,7 +336,7 @@ class CityCctvService:
             engine.setInput(blob)
             outputs = engine.forward()
 
-            vehicle_classes = {2: 'Car', 3: 'Motorcycle', 5: 'Bus', 7: 'Truck'}
+            vehicle_classes = {2: 'Car'}
             output = outputs[0]
             if output.shape[0] == 84:
                 output = output.T
