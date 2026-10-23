@@ -171,6 +171,37 @@ class FaceTests(unittest.TestCase):
                     face.capture_snapshot()
                 self.assertEqual(packets[-1]['status'], 'error')
 
+    def test_blockly_custom_percent_reads_one_capture_and_keeps_default_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory)
+            service.operate('face_enroll', 'Andi')
+            captures = []
+            service.capture = lambda: captures.append(1) or b'\xff\xd8fake\xff\xd9'
+            service.feature = lambda _: np.array([0.6, 0.8], dtype=np.float32)
+            packets = []
+            with patch.object(face, '_service', service), face.session(packets.append):
+                self.assertFalse(face.is_recognized_at_least(70))
+                self.assertEqual(face.get_last_similarity_percent(), 60.0)
+                self.assertEqual(face.get_recognized_name(), '')
+                self.assertEqual(len(captures), 1)
+                self.assertEqual(packets[-1]['threshold'], 0.7)
+                self.assertEqual(packets[-1]['name'], '')
+
+                self.assertTrue(face.is_recognized_at_least(50))
+                self.assertEqual(face.get_last_similarity_percent(), 60.0)
+                self.assertEqual(face.get_recognized_name(), 'Andi')
+                self.assertEqual(len(captures), 2)
+                self.assertEqual(packets[-1]['threshold'], 0.5)
+
+                self.assertTrue(face.is_recognized())
+                self.assertEqual(packets[-1]['threshold'], 0.363)
+                self.assertEqual(len(captures), 3)
+                for invalid in (-1, 101, float('nan'), float('inf'), True, 'abc'):
+                    with self.assertRaises(ValueError):
+                        face.is_recognized_at_least(invalid)
+                self.assertEqual(len(captures), 3)
+            self.assertEqual(face.get_last_similarity_percent(), 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()
