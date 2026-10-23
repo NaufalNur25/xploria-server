@@ -93,8 +93,9 @@ def read_frame(port, timeout=12, allow_legacy_fallback=False):
     size = _read_header_line(port, time.monotonic() + first_wait)
 
     if size is None and allow_legacy_fallback:
-        # Fallback otomatis ke protokol lama ('C' -> 'JPEG:<size>')
-        port.write(b'C')
+        # Fallback coba kirim 'GET\n' jika ESP32-CAM menjalankan firmware protokol GET
+        port.reset_input_buffer()
+        port.write(b'GET\n')
         port.flush()
         size = _read_header_line(port, deadline)
 
@@ -139,7 +140,7 @@ def _resolve_serial_port():
     env_port = os.environ.get('XPLORIA_CAMERA_PORT')
     if env_port and os.path.exists(env_port):
         return env_port
-    for candidate in ('/dev/serial0', '/dev/ttyUSB0', '/dev/ttyAMA0'):
+    for candidate in ('/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/serial0', '/dev/ttyAMA0'):
         if os.path.exists(candidate):
             return candidate
     return env_port or '/dev/serial0'
@@ -187,10 +188,11 @@ class CityCctvService:
             return self._mock_jpeg()
 
         import serial
-        with serial.Serial(port_name, baud_rate, timeout=0.1, write_timeout=2, exclusive=True) as port:
+        with serial.Serial(port_name, baud_rate, timeout=1.0, write_timeout=2, exclusive=True) as port:
             time.sleep(0.1)
             port.reset_input_buffer()
-            port.write(b'GET\n')
+            # Protokol tim HW (tesuart_yolo.py): kirim 'C'
+            port.write(b'C')
             port.flush()
             return read_frame(port, allow_legacy_fallback=True)
 

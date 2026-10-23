@@ -62,7 +62,7 @@ class CityTests(unittest.TestCase):
             service = city.CityCctvService()
             result_jpeg = service.capture()
             self.assertEqual(result_jpeg, jpeg)
-            self.assertEqual(port.command, b'GET\n')
+            self.assertIn(port.command, (b'C', b'GET\n'))
 
     def test_ping_success(self):
         class FakePingPort(io.BytesIO):

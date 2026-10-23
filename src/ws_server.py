@@ -528,7 +528,30 @@ async def handler(websocket):
                     await websocket.send(json.dumps(response))
                     continue
 
-                if msg_type == "control" and data.get("hw_type") == "esp32_cam":
+                if msg_type == "control" and (
+                    data.get("hw_type") in ("cctv_cam", "esp32_cctv", "vehicle_counter")
+                    or (data.get("command") in city.COMMANDS)
+                ):
+                    if not isinstance(data.get("request_id"), str) or not data["request_id"]:
+                        raise ValueError("request_id cctv diperlukan.")
+                    if data.get("command") not in city.COMMANDS:
+                        await websocket.send(json.dumps({"type": "cctv_result",
+                            "request_id": data["request_id"], "status": "error",
+                            "message": f"Perintah cctv tidak didukung: {data.get('command')}"}))
+                        continue
+                    if camera_stop is not None and not camera_stop.is_set():
+                        await websocket.send(json.dumps({"type": "cctv_result",
+                            "request_id": data["request_id"], "status": "error",
+                            "message": "Kamera sedang digunakan."}))
+                        continue
+                    camera_stop = threading.Event()
+                    task = asyncio.create_task(cctv_job(dict(data), camera_stop))
+                    task.add_done_callback(lambda _, event=camera_stop: event.set())
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    continue
+
+                if msg_type == "control" and (data.get("hw_type") == "esp32_cam" or data.get("command") in face.COMMANDS):
                     if not isinstance(data.get("request_id"), str) or not data["request_id"]:
                         raise ValueError("request_id kamera diperlukan.")
                     if data.get("command") not in face.COMMANDS:
@@ -588,25 +611,7 @@ async def handler(websocket):
                     continue
 
 
-                if msg_type == "control" and data.get("hw_type") in ("cctv_cam", "esp32_cctv", "vehicle_counter"):
-                    if not isinstance(data.get("request_id"), str) or not data["request_id"]:
-                        raise ValueError("request_id cctv diperlukan.")
-                    if data.get("command") not in city.COMMANDS:
-                        await websocket.send(json.dumps({"type": "cctv_result",
-                            "request_id": data["request_id"], "status": "error",
-                            "message": f"Perintah cctv tidak didukung: {data.get('command')}"}))
-                        continue
-                    if camera_stop is not None and not camera_stop.is_set():
-                        await websocket.send(json.dumps({"type": "cctv_result",
-                            "request_id": data["request_id"], "status": "error",
-                            "message": "Kamera sedang digunakan."}))
-                        continue
-                    camera_stop = threading.Event()
-                    task = asyncio.create_task(cctv_job(dict(data), camera_stop))
-                    task.add_done_callback(lambda _, event=camera_stop: event.set())
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
-                    continue
+
 
                 # Metadata v2 pilot: only the Smart Home door-lock servo is
                 # accepted here. Other actuators keep using their legacy path
