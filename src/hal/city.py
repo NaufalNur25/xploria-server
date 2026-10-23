@@ -146,12 +146,19 @@ def _resolve_serial_port():
 
 
 def _import_yolo():
-    """Import ultralytics YOLO, memprioritaskan virtualenv tim HW di ~/smartcity/smartcctv/pi."""
+    """Import ultralytics YOLO, memprioritaskan virtualenv yang ada di sistem Pi."""
     import glob
     import sys
-    for sp in sorted(glob.glob('/home/xploria/smartcity/smartcctv/pi/lib/python*/site-packages')):
-        if sp not in sys.path:
-            sys.path.insert(0, sp)
+    search_patterns = (
+        '/home/xploria/iot-receiver/venv/lib/python*/site-packages',
+        '/home/xploria/smartcity/smartcctv/pi/lib/python*/site-packages',
+        '/home/xploria/*/venv/lib/python*/site-packages',
+        '/home/xploria/*/*/pi/lib/python*/site-packages',
+    )
+    for pat in search_patterns:
+        for sp in sorted(glob.glob(pat)):
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
     try:
         from ultralytics import YOLO
         return YOLO
