@@ -478,14 +478,25 @@ class CityCctvService:
                 self.vehicle_count += 1
 
             jpeg_b64 = base64.b64encode(det['jpeg_bytes']).decode('ascii')
+            persons_cnt = det.get('persons_count', 0)
+            cars_cnt = det.get('cars_count', 0)
+            if det['is_car']:
+                msg = f"Mobil Terdeteksi ({cars_cnt} Mobil)!"
+            elif persons_cnt > 0:
+                msg = f"{persons_cnt} Orang Terdeteksi."
+            else:
+                msg = "Jalanan Kosong (Tidak Ada Mobil/Orang)."
+
             result = {
                 'status': det['status'],
                 'is_car': det['is_car'],
                 'confidence': det['confidence'],
                 'label': det['label'],
                 'count': self.vehicle_count,
+                'cars_count': cars_cnt,
+                'persons_count': persons_cnt,
                 'jpeg_base64': jpeg_b64,
-                'message': 'Mobil Terdeteksi!' if det['is_car'] else 'Jalanan Kosong (Tidak Ada Mobil).'
+                'message': msg
             }
             self.last_result = result
             return result
